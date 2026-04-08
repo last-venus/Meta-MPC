@@ -99,6 +99,7 @@ typedef struct quadrotor2D_learned_solver_capsule
     // dynamics
 
     external_function_external_param_casadi *expl_vde_forw;
+    external_function_external_param_casadi *expl_vde_forw_p;
     external_function_external_param_casadi *expl_ode_fun;
     external_function_external_param_casadi *expl_vde_adj;
 
@@ -151,19 +152,11 @@ ACADOS_SYMBOL_EXPORT int quadrotor2D_learned_acados_set_p_global_and_precompute_
 ACADOS_SYMBOL_EXPORT int quadrotor2D_learned_acados_solve(quadrotor2D_learned_solver_capsule * capsule);
 ACADOS_SYMBOL_EXPORT int quadrotor2D_learned_acados_setup_qp_matrices_and_factorize(quadrotor2D_learned_solver_capsule* capsule);
 
-ACADOS_SYMBOL_EXPORT void quadrotor2D_learned_acados_batch_solve(quadrotor2D_learned_solver_capsule ** capsules, int * status_out, int N_batch);
-
-ACADOS_SYMBOL_EXPORT void quadrotor2D_learned_acados_batch_set_flat(quadrotor2D_learned_solver_capsule ** capsules, const char *field, double *data, int N_data, int N_batch);
-ACADOS_SYMBOL_EXPORT void quadrotor2D_learned_acados_batch_get_flat(quadrotor2D_learned_solver_capsule ** capsules, const char *field, double *data, int N_data, int N_batch);
-
-ACADOS_SYMBOL_EXPORT void quadrotor2D_learned_acados_batch_eval_solution_sens_adj_p(quadrotor2D_learned_solver_capsule ** capsules, const char *field, int stage, double *out, int offset, int N_batch);
-ACADOS_SYMBOL_EXPORT void quadrotor2D_learned_acados_batch_eval_params_jac(quadrotor2D_learned_solver_capsule ** capsules, int N_batch);
 
 
 ACADOS_SYMBOL_EXPORT int quadrotor2D_learned_acados_free(quadrotor2D_learned_solver_capsule * capsule);
 ACADOS_SYMBOL_EXPORT void quadrotor2D_learned_acados_print_stats(quadrotor2D_learned_solver_capsule * capsule);
 ACADOS_SYMBOL_EXPORT int quadrotor2D_learned_acados_custom_update(quadrotor2D_learned_solver_capsule* capsule, double* data, int data_len);
-
 
 ACADOS_SYMBOL_EXPORT ocp_nlp_in *quadrotor2D_learned_acados_get_nlp_in(quadrotor2D_learned_solver_capsule * capsule);
 ACADOS_SYMBOL_EXPORT ocp_nlp_out *quadrotor2D_learned_acados_get_nlp_out(quadrotor2D_learned_solver_capsule * capsule);

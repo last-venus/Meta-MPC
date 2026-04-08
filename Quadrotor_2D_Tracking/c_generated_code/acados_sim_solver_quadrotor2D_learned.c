@@ -75,6 +75,8 @@ int quadrotor2D_learned_acados_sim_create(quadrotor2D_learned_sim_solver_capsule
 
     double Tsim = 0.05;
 
+    capsule->acados_sim_mem = NULL;
+
     external_function_opts ext_fun_opts;
     external_function_opts_set_to_default(&ext_fun_opts);
     ext_fun_opts.external_workspace = false;
@@ -84,6 +86,9 @@ int quadrotor2D_learned_acados_sim_create(quadrotor2D_learned_sim_solver_capsule
     capsule->sim_expl_vde_forw = (external_function_param_casadi *) malloc(sizeof(external_function_param_casadi));
     capsule->sim_vde_adj_casadi = (external_function_param_casadi *) malloc(sizeof(external_function_param_casadi));
     capsule->sim_expl_ode_fun_casadi = (external_function_param_casadi *) malloc(sizeof(external_function_param_casadi));
+    
+        capsule->sim_expl_vde_forw_p = NULL;
+    
 
     capsule->sim_expl_vde_forw->casadi_fun = &quadrotor2D_learned_expl_vde_forw;
     capsule->sim_expl_vde_forw->casadi_n_in = &quadrotor2D_learned_expl_vde_forw_n_in;
@@ -111,6 +116,8 @@ int quadrotor2D_learned_acados_sim_create(quadrotor2D_learned_sim_solver_capsule
 
     
 
+    
+
     // sim plan & config
     sim_solver_plan_t plan;
     plan.sim_solver = ERK;
@@ -125,6 +132,7 @@ int quadrotor2D_learned_acados_sim_create(quadrotor2D_learned_sim_solver_capsule
     sim_dims_set(quadrotor2D_learned_sim_config, quadrotor2D_learned_sim_dims, "nx", &nx);
     sim_dims_set(quadrotor2D_learned_sim_config, quadrotor2D_learned_sim_dims, "nu", &nu);
     sim_dims_set(quadrotor2D_learned_sim_config, quadrotor2D_learned_sim_dims, "nz", &nz);
+    sim_dims_set(quadrotor2D_learned_sim_config, quadrotor2D_learned_sim_dims, "np", &np);
 
 
     // sim opts
@@ -162,11 +170,14 @@ int quadrotor2D_learned_acados_sim_create(quadrotor2D_learned_sim_solver_capsule
                  "expl_vde_adj", capsule->sim_vde_adj_casadi);
     quadrotor2D_learned_sim_config->model_set(quadrotor2D_learned_sim_in->model,
                  "expl_ode_fun", capsule->sim_expl_ode_fun_casadi);
+    
 
     // sim solver
     sim_solver *quadrotor2D_learned_sim_solver = sim_solver_create(quadrotor2D_learned_sim_config,
                                                quadrotor2D_learned_sim_dims, quadrotor2D_learned_sim_opts, quadrotor2D_learned_sim_in);
     capsule->acados_sim_solver = quadrotor2D_learned_sim_solver;
+
+    capsule->acados_sim_mem = quadrotor2D_learned_sim_solver->mem;
 
 
 
@@ -217,17 +228,6 @@ int quadrotor2D_learned_acados_sim_solve(quadrotor2D_learned_sim_solver_capsule 
 }
 
 
-void quadrotor2D_learned_acados_sim_batch_solve(quadrotor2D_learned_sim_solver_capsule ** capsules, int N_batch)
-{
-
-    for (int i = 0; i < N_batch; i++)
-    {
-        sim_solve(capsules[i]->acados_sim_solver, capsules[i]->acados_sim_in, capsules[i]->acados_sim_out);
-    }
-
-
-    return;
-}
 
 
 int quadrotor2D_learned_acados_sim_free(quadrotor2D_learned_sim_solver_capsule *capsule)
@@ -244,9 +244,11 @@ int quadrotor2D_learned_acados_sim_free(quadrotor2D_learned_sim_solver_capsule *
     external_function_param_casadi_free(capsule->sim_expl_vde_forw);
     external_function_param_casadi_free(capsule->sim_vde_adj_casadi);
     external_function_param_casadi_free(capsule->sim_expl_ode_fun_casadi);
+    
     free(capsule->sim_expl_vde_forw);
     free(capsule->sim_vde_adj_casadi);
     free(capsule->sim_expl_ode_fun_casadi);
+    
 
     return 0;
 }
@@ -265,6 +267,7 @@ int quadrotor2D_learned_acados_sim_update_params(quadrotor2D_learned_sim_solver_
     capsule->sim_expl_vde_forw[0].set_param(capsule->sim_expl_vde_forw, p);
     capsule->sim_vde_adj_casadi[0].set_param(capsule->sim_vde_adj_casadi, p);
     capsule->sim_expl_ode_fun_casadi[0].set_param(capsule->sim_expl_ode_fun_casadi, p);
+    
 
     return status;
 }
@@ -298,5 +301,10 @@ sim_opts * quadrotor2D_learned_acados_get_sim_opts(quadrotor2D_learned_sim_solve
 sim_solver  * quadrotor2D_learned_acados_get_sim_solver(quadrotor2D_learned_sim_solver_capsule *capsule)
 {
     return capsule->acados_sim_solver;
+};
+
+void * quadrotor2D_learned_acados_get_sim_mem(quadrotor2D_learned_sim_solver_capsule *capsule)
+{
+    return capsule->acados_sim_mem;
 };
 

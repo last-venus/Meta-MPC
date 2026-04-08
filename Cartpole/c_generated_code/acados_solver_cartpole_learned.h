@@ -99,6 +99,7 @@ typedef struct cartpole_learned_solver_capsule
     // dynamics
 
     external_function_external_param_casadi *expl_vde_forw;
+    external_function_external_param_casadi *expl_vde_forw_p;
     external_function_external_param_casadi *expl_ode_fun;
     external_function_external_param_casadi *expl_vde_adj;
 
@@ -151,19 +152,11 @@ ACADOS_SYMBOL_EXPORT int cartpole_learned_acados_set_p_global_and_precompute_dep
 ACADOS_SYMBOL_EXPORT int cartpole_learned_acados_solve(cartpole_learned_solver_capsule * capsule);
 ACADOS_SYMBOL_EXPORT int cartpole_learned_acados_setup_qp_matrices_and_factorize(cartpole_learned_solver_capsule* capsule);
 
-ACADOS_SYMBOL_EXPORT void cartpole_learned_acados_batch_solve(cartpole_learned_solver_capsule ** capsules, int * status_out, int N_batch);
-
-ACADOS_SYMBOL_EXPORT void cartpole_learned_acados_batch_set_flat(cartpole_learned_solver_capsule ** capsules, const char *field, double *data, int N_data, int N_batch);
-ACADOS_SYMBOL_EXPORT void cartpole_learned_acados_batch_get_flat(cartpole_learned_solver_capsule ** capsules, const char *field, double *data, int N_data, int N_batch);
-
-ACADOS_SYMBOL_EXPORT void cartpole_learned_acados_batch_eval_solution_sens_adj_p(cartpole_learned_solver_capsule ** capsules, const char *field, int stage, double *out, int offset, int N_batch);
-ACADOS_SYMBOL_EXPORT void cartpole_learned_acados_batch_eval_params_jac(cartpole_learned_solver_capsule ** capsules, int N_batch);
 
 
 ACADOS_SYMBOL_EXPORT int cartpole_learned_acados_free(cartpole_learned_solver_capsule * capsule);
 ACADOS_SYMBOL_EXPORT void cartpole_learned_acados_print_stats(cartpole_learned_solver_capsule * capsule);
 ACADOS_SYMBOL_EXPORT int cartpole_learned_acados_custom_update(cartpole_learned_solver_capsule* capsule, double* data, int data_len);
-
 
 ACADOS_SYMBOL_EXPORT ocp_nlp_in *cartpole_learned_acados_get_nlp_in(cartpole_learned_solver_capsule * capsule);
 ACADOS_SYMBOL_EXPORT ocp_nlp_out *cartpole_learned_acados_get_nlp_out(cartpole_learned_solver_capsule * capsule);

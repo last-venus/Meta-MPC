@@ -1,6 +1,6 @@
 #include <l4casadi.hpp>
 
-L4CasADi l4casadi("/home/yu/Documents/01Project/MetaResidual/Cartpole/_l4c_generated", "residual_pendulum", 1, 5, 1, 2, "cpu", true, true, true, false, true, true);
+L4CasADi l4casadi("/home/jingxiuya/czc_code/MetaResidual-MPC/Cartpole/_l4c_generated", "residual_pendulum", 1, 5, 1, 2, "cpu", true, true, true, false, true, true);
 
 #ifdef __cplusplus
 extern "C" {
@@ -93,13 +93,13 @@ CASADI_SYMBOL_EXPORT int jac_adj1_residual_pendulum(const casadi_real** arg, cas
   if (res[1] != NULL) {
     l4casadi.invalid_argument("jac_adj_i0_out_o0 is not provided by L4CasADi. If you need this feature, please contact the L4CasADi developer.");
   }
+  if (res[0] != NULL) {
+    l4casadi.jac_adj1_p(arg[0], arg[2], res[0]);
+  }
   if (res[2] != NULL) {
-    l4casadi.invalid_argument("jac_adj_i0_adj_o0 is not provided by L4CasADi. If you need this feature, please contact the L4CasADi developer.");
+    l4casadi.jac_adj1_t(arg[0], arg[2], res[2]);
   }
-  if (res[0] == NULL) {
-    l4casadi.invalid_argument("L4CasADi can only provide jac_adj_i0_i0 for jac_adj1_residual_pendulum function. If you need this feature, please contact the L4CasADi developer.");
-  }
-  l4casadi.jac_adj1(arg[0], arg[2], res[0]);
+
   return 0;
 }
 

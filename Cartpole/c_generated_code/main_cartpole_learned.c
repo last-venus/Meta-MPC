@@ -71,7 +71,6 @@ int main()
     ocp_nlp_out *nlp_out = cartpole_learned_acados_get_nlp_out(acados_ocp_capsule);
     ocp_nlp_solver *nlp_solver = cartpole_learned_acados_get_nlp_solver(acados_ocp_capsule);
     void *nlp_opts = cartpole_learned_acados_get_nlp_opts(acados_ocp_capsule);
-
     // initial condition
     double lbx0[NBX0];
     double ubx0[NBX0];
@@ -84,8 +83,8 @@ int main()
     lbx0[3] = 0;
     ubx0[3] = 0;
 
-    ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, 0, "lbx", lbx0);
-    ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, 0, "ubx", ubx0);
+    ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, nlp_out, 0, "lbx", lbx0);
+    ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, nlp_out, 0, "ubx", ubx0);
 
     // initialization for state values
     double x_init[NX];
@@ -114,10 +113,10 @@ int main()
         // initialize solution
         for (int i = 0; i < N; i++)
         {
-            ocp_nlp_out_set(nlp_config, nlp_dims, nlp_out, i, "x", x_init);
-            ocp_nlp_out_set(nlp_config, nlp_dims, nlp_out, i, "u", u0);
+            ocp_nlp_out_set(nlp_config, nlp_dims, nlp_out, nlp_in, i, "x", x_init);
+            ocp_nlp_out_set(nlp_config, nlp_dims, nlp_out, nlp_in, i, "u", u0);
         }
-        ocp_nlp_out_set(nlp_config, nlp_dims, nlp_out, N, "x", x_init);
+        ocp_nlp_out_set(nlp_config, nlp_dims, nlp_out, nlp_in, N, "x", x_init);
         status = cartpole_learned_acados_solve(acados_ocp_capsule);
         ocp_nlp_get(nlp_solver, "time_tot", &elapsed_time);
         min_time = MIN(elapsed_time, min_time);

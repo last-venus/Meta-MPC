@@ -30,6 +30,8 @@
 
 
 
+
+
 # define sources and use make's implicit rules to generate object files (*.o)
 
 # model
@@ -70,11 +72,11 @@ OBJ+= $(OCP_OBJ)
 
 EXTERNAL_DIR=
 EXTERNAL_LIB=
-EXTERNAL_DIR+= /home/yu/Documents/01Project/MetaResidual/Cartpole/_l4c_generated
+EXTERNAL_DIR+= /home/jingxiuya/czc_code/MetaResidual-MPC/Cartpole/_l4c_generated
 EXTERNAL_LIB+= residual_pendulum
 
-INCLUDE_PATH = /home/yu/Software/acados/include
-LIB_PATH = /home/yu/Software/acados/lib
+INCLUDE_PATH = /home/jingxiuya/czc_code/acados/include
+LIB_PATH = /home/jingxiuya/czc_code/acados/lib
 
 # preprocessor flags for make's implicit rules
 CPPFLAGS+= -I$(INCLUDE_PATH)
@@ -84,10 +86,10 @@ CPPFLAGS+= -I$(INCLUDE_PATH)/hpipm/include
 
 
 # define the c-compiler flags for make's implicit rules
-CFLAGS = -fPIC -std=c99   -O2#-fno-diagnostics-show-line-numbers -g
+CFLAGS = -fPIC -std=c99   -O2
 
 # # Debugging
-# CFLAGS += -g3
+# CFLAGS += -g3 -fno-diagnostics-show-line-numbers -g
 
 # linker flags
 LDFLAGS+= -L$(LIB_PATH)
@@ -108,7 +110,7 @@ LIBACADOS_SIM_SOLVER=lib$(SIM_SRC:.c=.so)
 # virtual targets
 .PHONY : all clean
 
-all: clean example_sim example
+	all: clean example_sim example
 shared_lib: bundled_shared_lib ocp_shared_lib sim_shared_lib
 
 # some linker targets
@@ -134,17 +136,18 @@ ocp_cython_c: ocp_shared_lib
 	-o acados_ocp_solver_pyx.c \
 	-I $(INCLUDE_PATH)/../interfaces/acados_template/acados_template \
 	$(INCLUDE_PATH)/../interfaces/acados_template/acados_template/acados_ocp_solver_pyx.pyx \
-	-I /home/yu/Documents/01Project/MetaResidual/Cartpole/c_generated_code \
+	-I /home/jingxiuya/czc_code/MetaResidual-MPC/Cartpole/c_generated_code \
 
 ocp_cython_o: ocp_cython_c
 	$(CC) $(ACADOS_FLAGS) -c -O2 \
 	-fPIC \
+	-DNPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION \
 	-o acados_ocp_solver_pyx.o \
 	-I $(INCLUDE_PATH)/blasfeo/include/ \
 	-I $(INCLUDE_PATH)/hpipm/include/ \
 	-I $(INCLUDE_PATH) \
-	-I /home/yu/.local/lib/python3.10/site-packages/numpy/core/include \
-	-I /home/yu/anaconda3/envs/l4control/include/python3.10 \
+	-I /home/jingxiuya/miniconda3/envs/l4control/lib/python3.10/site-packages/numpy/_core/include \
+	-I /home/jingxiuya/miniconda3/envs/l4control/include/python3.10 \
 	acados_ocp_solver_pyx.c \
 
 ocp_cython: ocp_cython_o
@@ -162,17 +165,18 @@ sim_cython_c: sim_shared_lib
 	-o acados_sim_solver_pyx.c \
 	-I $(INCLUDE_PATH)/../interfaces/acados_template/acados_template \
 	$(INCLUDE_PATH)/../interfaces/acados_template/acados_template/acados_sim_solver_pyx.pyx \
-	-I /home/yu/Documents/01Project/MetaResidual/Cartpole/c_generated_code \
+	-I /home/jingxiuya/czc_code/MetaResidual-MPC/Cartpole/c_generated_code \
 
 sim_cython_o: sim_cython_c
 	$(CC) $(ACADOS_FLAGS) -c -O2 \
 	-fPIC \
+	-DNPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION \
 	-o acados_sim_solver_pyx.o \
 	-I $(INCLUDE_PATH)/blasfeo/include/ \
 	-I $(INCLUDE_PATH)/hpipm/include/ \
 	-I $(INCLUDE_PATH) \
-	-I /home/yu/.local/lib/python3.10/site-packages/numpy/core/include \
-	-I /home/yu/anaconda3/envs/l4control/include/python3.10 \
+	-I /home/jingxiuya/miniconda3/envs/l4control/lib/python3.10/site-packages/numpy/_core/include \
+	-I /home/jingxiuya/miniconda3/envs/l4control/include/python3.10 \
 	acados_sim_solver_pyx.c \
 
 sim_cython: sim_cython_o

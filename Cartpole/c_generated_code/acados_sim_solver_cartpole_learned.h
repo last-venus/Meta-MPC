@@ -54,6 +54,7 @@ typedef struct cartpole_learned_sim_solver_capsule
     sim_opts *acados_sim_opts;
     sim_config *acados_sim_config;
     void *acados_sim_dims;
+    void *acados_sim_mem;
 
     /* external functions */
     // ERK
@@ -61,12 +62,14 @@ typedef struct cartpole_learned_sim_solver_capsule
     external_function_param_casadi * sim_vde_adj_casadi;
     external_function_param_casadi * sim_expl_ode_fun_casadi;
     external_function_param_casadi * sim_expl_ode_hess;
+    external_function_param_casadi * sim_expl_vde_forw_p;
 
     // IRK
     external_function_param_casadi * sim_impl_dae_fun;
     external_function_param_casadi * sim_impl_dae_fun_jac_x_xdot_z;
     external_function_param_casadi * sim_impl_dae_jac_x_xdot_u_z;
     external_function_param_casadi * sim_impl_dae_hess;
+    external_function_param_casadi * sim_impl_dae_jac_p;
 
     // GNSF
     external_function_param_casadi * sim_gnsf_phi_fun;
@@ -80,7 +83,7 @@ typedef struct cartpole_learned_sim_solver_capsule
 
 ACADOS_SYMBOL_EXPORT int cartpole_learned_acados_sim_create(cartpole_learned_sim_solver_capsule *capsule);
 ACADOS_SYMBOL_EXPORT int cartpole_learned_acados_sim_solve(cartpole_learned_sim_solver_capsule *capsule);
-ACADOS_SYMBOL_EXPORT void cartpole_learned_acados_sim_batch_solve(cartpole_learned_sim_solver_capsule **capsules, int N_batch);
+
 ACADOS_SYMBOL_EXPORT int cartpole_learned_acados_sim_free(cartpole_learned_sim_solver_capsule *capsule);
 ACADOS_SYMBOL_EXPORT int cartpole_learned_acados_sim_update_params(cartpole_learned_sim_solver_capsule *capsule, double *value, int np);
 
@@ -90,7 +93,7 @@ ACADOS_SYMBOL_EXPORT sim_out * cartpole_learned_acados_get_sim_out(cartpole_lear
 ACADOS_SYMBOL_EXPORT void * cartpole_learned_acados_get_sim_dims(cartpole_learned_sim_solver_capsule *capsule);
 ACADOS_SYMBOL_EXPORT sim_opts * cartpole_learned_acados_get_sim_opts(cartpole_learned_sim_solver_capsule *capsule);
 ACADOS_SYMBOL_EXPORT sim_solver * cartpole_learned_acados_get_sim_solver(cartpole_learned_sim_solver_capsule *capsule);
-
+ACADOS_SYMBOL_EXPORT void * cartpole_learned_acados_get_sim_mem(cartpole_learned_sim_solver_capsule *capsule);
 
 ACADOS_SYMBOL_EXPORT cartpole_learned_sim_solver_capsule * cartpole_learned_acados_sim_solver_create_capsule(void);
 ACADOS_SYMBOL_EXPORT int cartpole_learned_acados_sim_solver_free_capsule(cartpole_learned_sim_solver_capsule *capsule);
