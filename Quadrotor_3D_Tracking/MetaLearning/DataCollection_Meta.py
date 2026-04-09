@@ -18,7 +18,11 @@
     输出: [x_ddot, y_ddot, z_ddot, p_dot, q_dot, r_dot] 的残差 -> 共 6 维
 """
 
+import argparse
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 from pathlib import Path
 
 import casadi as cs
@@ -83,82 +87,117 @@ def collect_episode(task_id, episode_id, inertial_prop, ref_cfg):
     """
     # 用当前任务对应的“真实惯性参数”创建仿真环境。
     env = Quadrotor(**make_env_config(seed=task_id * 100 + episode_id, gui=False, done_on_out_of_bound=False, episode_len_sec=T, inertial_prop=inertial_prop))
-
-    # 构造 MPC 内部使用的 nominal dynamics。
-    # 这里故意不和真实环境完全一致，这样系统里才会存在可学习的 residual。
-    model = Quadrotor3DNominalDynamics(env).model()
-
-    # 把名义动力学封装成可调用的 CasADi 函数，后面打标签时要用它来计算 nominal 预测。
-    nominal_func = cs.Function("f_nom", [model.x, model.u], [model.f_nominal])
-    solver = MPC(model=model, n_horizon=N, t_horizon=T_HORIZON).solver
-
-    obs, _ = env.reset()
-    # 这里只取前 12 维，也就是 3D 四旋翼状态：
-    # [x, x_dot, y, y_dot, z, z_dot, phi, theta, psi, p, q, r]
-    x = np.array(obs[:12], dtype=float)
     rows = []
+    try:
+        # 构造 MPC 内部使用的 nominal dynamics。
+        # 这里故意不和真实环境完全一致，这样系统里才会存在可学习的 residual。
+        model = Quadrotor3DNominalDynamics(env).model()
 
-    for step in range(STEPS):
-        current_time = step * DT
+        # 把名义动力学封装成可调用的 CasADi 函数，后面打标签时要用它来计算 nominal 预测。
+        nominal_func = cs.Function("f_nom", [model.x, model.u], [model.f_nominal])
+        solver = MPC(model=model, n_horizon=N, t_horizon=T_HORIZON).solver
 
-        # 给整个 MPC horizon 填入未来参考轨迹。
-        for k in range(N):
-            x_ref_k = reference_state(current_time + k * T_HORIZON / N, ref_cfg)
-            # 对 LINEAR_LS 代价来说，acados 的 yref 形式是 [state_ref, control_ref]。
-            # 这里控制参考设成 0，所以在状态参考后拼接 4 个 0。
-            solver.set(k, "yref", np.concatenate([x_ref_k, np.zeros(4)]))
+        obs, _ = env.reset()
+        # 这里只取前 12 维，也就是 3D 四旋翼状态：
+        # [x, x_dot, y, y_dot, z, z_dot, phi, theta, psi, p, q, r]
+        x = np.array(obs[:12], dtype=float)
 
-        # 终端时刻的状态参考。
-        solver.set(N, "yref", reference_state(current_time + T_HORIZON, ref_cfg))
+        for step in range(STEPS):
+            current_time = step * DT
 
-        # 标准 MPC 做法：把第一个 shooting node 固定为当前状态。
-        solver.set(0, "lbx", x)
-        solver.set(0, "ubx", x)
-        solver.solve()
+            # 给整个 MPC horizon 填入未来参考轨迹。
+            for k in range(N):
+                x_ref_k = reference_state(current_time + k * T_HORIZON / N, ref_cfg)
+                # 对 LINEAR_LS 代价来说，acados 的 yref 形式是 [state_ref, control_ref]。
+                # 这里控制参考设成 0，所以在状态参考后拼接 4 个 0。
+                solver.set(k, "yref", np.concatenate([x_ref_k, np.zeros(4)]))
 
-        # 取优化序列里的第一个控制量，作用到真实仿真环境。
-        u = np.array(solver.get(0, "u"), dtype=float)
-        next_obs, _, _, _ = env.step(u)
-        x_next = np.array(next_obs[:12], dtype=float)
+            # 终端时刻的状态参考。
+            solver.set(N, "yref", reference_state(current_time + T_HORIZON, ref_cfg))
 
-        # 用相邻时刻状态差分来近似“真实”的二阶量。
-        # 这里只学习平动加速度和机体系角速度导数的残差，
-        # 不去学习像 x_dot 这种本来就是运动学恒等式的项。
-        true_targets = np.array([
-            (x_next[1] - x[1]) / DT,
-            (x_next[3] - x[3]) / DT,
-            (x_next[5] - x[5]) / DT,
-            (x_next[9] - x[9]) / DT,
-            (x_next[10] - x[10]) / DT,
-            (x_next[11] - x[11]) / DT,
-        ])
+            # 标准 MPC 做法：把第一个 shooting node 固定为当前状态。
+            solver.set(0, "lbx", x)
+            solver.set(0, "ubx", x)
+            status = solver.solve()
+            if status != 0:
+                raise RuntimeError(
+                    f"MPC solve failed at task={task_id}, episode={episode_id}, step={step}, status={status}"
+                )
 
-        # 计算 nominal model 在同一个 (x, u) 下的预测值。
-        nominal_targets = nominal_func(x, u).full().flatten()[[1, 3, 5, 9, 10, 11]]
+            # 取优化序列里的第一个控制量，作用到真实仿真环境。
+            u = np.array(solver.get(0, "u"), dtype=float)
+            next_obs, _, _, _ = env.step(u)
+            x_next = np.array(next_obs[:12], dtype=float)
 
-        # 真值减去名义预测，就是后面监督学习要拟合的 residual label。
-        residual_targets = true_targets - nominal_targets
+            # 用相邻时刻状态差分来近似“真实”的二阶量。
+            # 这里只学习平动加速度和机体系角速度导数的残差，
+            # 不去学习像 x_dot 这种本来就是运动学恒等式的项。
+            true_targets = np.array([
+                (x_next[1] - x[1]) / DT,
+                (x_next[3] - x[3]) / DT,
+                (x_next[5] - x[5]) / DT,
+                (x_next[9] - x[9]) / DT,
+                (x_next[10] - x[10]) / DT,
+                (x_next[11] - x[11]) / DT,
+            ])
 
-        # 保存一条监督学习样本，同时把任务元信息也存下来，
-        # 这样后面可以按 task_id 重新组织成元学习任务。
-        rows.append([
-            task_id, episode_id, step * DT,
-            inertial_prop[0] / BASE_MASS, inertial_prop[1] / BASE_IXX, inertial_prop[2] / BASE_IYY, inertial_prop[3] / BASE_IZZ,
-            ref_cfg.center[0], ref_cfg.center[1], ref_cfg.center[2], ref_cfg.radius, ref_cfg.z_amp, ref_cfg.yaw_ref,
-            *x, *u, *true_targets, *nominal_targets, *residual_targets,
-            env.MASS, env.J[0, 0], env.J[1, 1], env.J[2, 2],
-        ])
+            # 计算 nominal model 在同一个 (x, u) 下的预测值。
+            nominal_targets = nominal_func(x, u).full().flatten()[[1, 3, 5, 9, 10, 11]]
 
-        # 状态向前推进，进入下一步采样。
-        x = x_next
+            # 真值减去名义预测，就是后面监督学习要拟合的 residual label。
+            residual_targets = true_targets - nominal_targets
 
-    env.close()
+            # 保存一条监督学习样本，同时把任务元信息也存下来，
+            # 这样后面可以按 task_id 重新组织成元学习任务。
+            rows.append([
+                task_id, episode_id, step * DT,
+                inertial_prop[0] / BASE_MASS, inertial_prop[1] / BASE_IXX, inertial_prop[2] / BASE_IYY, inertial_prop[3] / BASE_IZZ,
+                ref_cfg.center[0], ref_cfg.center[1], ref_cfg.center[2], ref_cfg.radius, ref_cfg.z_amp, ref_cfg.yaw_ref,
+                *x, *u, *true_targets, *nominal_targets, *residual_targets,
+                env.MASS, env.J[0, 0], env.J[1, 1], env.J[2, 2],
+            ])
+
+            # 状态向前推进，进入下一步采样。
+            x = x_next
+    finally:
+        env.close()
+
     return rows
 
 
-def main():
+def collect_task_rollouts(task_spec):
+    task_id, inertial_prop, ref_cfg = task_spec
+    rows = []
+    for episode_id in range(EPISODES_PER_TASK):
+        rows.extend(collect_episode(task_id, episode_id, inertial_prop, ref_cfg))
+    return task_id, ref_cfg, rows
+
+
+def parse_args():
+    default_workers = max(1, min(8, os.cpu_count() or 1))
+    parser = argparse.ArgumentParser(description="Collect 3D quadrotor meta-learning data.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=default_workers,
+        help=f"Number of worker processes for task-level parallel collection (default: {default_workers}).",
+    )
+    parser.add_argument(
+        "--max-tasks",
+        type=int,
+        default=None,
+        help="Optional cap on the number of tasks to collect, useful for quick debugging.",
+    )
+    return parser.parse_args()
+
+
+def main(workers: int, max_tasks: int | None = None):
+    if workers < 1:
+        raise ValueError("--workers must be at least 1.")
+
     # all_rows 用来累计所有任务、所有 episode 产生的样本。
     all_rows = []
+    task_specs = []
     task_id = 0
 
     # 下面这组嵌套循环就是在枚举任务分布。
@@ -171,13 +210,34 @@ def main():
                 for izz_ratio in IZZ_RATIOS:
                     inertial_prop = [BASE_MASS * mass_ratio, BASE_IXX * ixx_ratio, BASE_IYY * iyy_ratio, BASE_IZZ * izz_ratio]
                     for ref_cfg in REFERENCE_TASKS:
-                        print(
-                            f"[Task {task_id}] M={mass_ratio:.2f}, Ixx={ixx_ratio:.2f}, "
-                            f"Iyy={iyy_ratio:.2f}, Izz={izz_ratio:.2f}, center={ref_cfg.center}"
-                        )
-                        for episode_id in range(EPISODES_PER_TASK):
-                            all_rows.extend(collect_episode(task_id, episode_id, inertial_prop, ref_cfg))
+                        task_specs.append((task_id, inertial_prop, ref_cfg))
                         task_id += 1
+
+    if max_tasks is not None:
+        task_specs = task_specs[:max_tasks]
+
+    print(f"Collecting {len(task_specs)} tasks with {workers} worker(s).")
+    if workers == 1:
+        task_iter = (collect_task_rollouts(task_spec) for task_spec in task_specs)
+    else:
+        mp_context = get_context("spawn")
+        executor = ProcessPoolExecutor(max_workers=workers, mp_context=mp_context)
+        task_iter = executor.map(collect_task_rollouts, task_specs)
+
+    try:
+        for idx, (task_id, ref_cfg, rows) in enumerate(task_iter, start=1):
+            mass_ratio = task_specs[idx - 1][1][0] / BASE_MASS
+            ixx_ratio = task_specs[idx - 1][1][1] / BASE_IXX
+            iyy_ratio = task_specs[idx - 1][1][2] / BASE_IYY
+            izz_ratio = task_specs[idx - 1][1][3] / BASE_IZZ
+            print(
+                f"[{idx:04d}/{len(task_specs):04d}] M={mass_ratio:.2f}, Ixx={ixx_ratio:.2f}, "
+                f"Iyy={iyy_ratio:.2f}, Izz={izz_ratio:.2f}, center={ref_cfg.center}"
+            )
+            all_rows.extend(rows)
+    finally:
+        if workers != 1:
+            executor.shutdown()
 
     # 这些列名定义了后续 Offline_Train_Meta.py 读取时依赖的数据格式。
     # 大致可以分成几部分：
@@ -206,4 +266,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(workers=args.workers, max_tasks=args.max_tasks)

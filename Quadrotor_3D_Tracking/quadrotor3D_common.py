@@ -1,5 +1,7 @@
+import os
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +42,8 @@ NOMINAL_RATIOS = {
 DEFAULT_META_DATASET_PATH = TRACKING_DIR / "meta_dataset_quadrotor3D" / "quadrotor3d_meta_residual_mpc.csv"
 DEFAULT_META_CHECKPOINT_PATH = TRACKING_DIR / "MetaLearning" / "maml_quadrotor3d_meta_init_3_128.pth"
 DEFAULT_RESULTS_DIR = TRACKING_DIR / "results"
+DEFAULT_ACADOS_EXPORT_DIR = TRACKING_DIR / "c_generated_code"
+DEFAULT_L4C_BUILD_DIR = TRACKING_DIR / "_l4c_generated"
 
 
 @dataclass
@@ -62,6 +66,19 @@ class MLP(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+@contextmanager
+def working_directory(path: Path):
+    """Temporarily switch cwd so generated artifacts stay inside the tracking folder."""
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    prev_cwd = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(prev_cwd)
 
 
 def seed_everything(seed: int) -> None:
@@ -293,6 +310,13 @@ class MPC:
     def solver(self):
         return AcadosOcpSolver(self.ocp())
 
+    def _codegen_paths(self) -> tuple[Path, Path]:
+        # acados code generation is not process-safe when multiple workers share
+        # the same JSON/export paths, so isolate artifacts per PID.
+        process_dir = DEFAULT_ACADOS_EXPORT_DIR / f"{self.model.name}_pid{os.getpid()}"
+        json_path = process_dir / f"{self.model.name}_ocp.json"
+        return process_dir, json_path
+
     def ocp(self):
         model_ac = self.acados_model(self.model)
         nx = 12
@@ -302,6 +326,22 @@ class MPC:
 
         ocp = AcadosOcp()
         ocp.model = model_ac
+        code_export_dir, json_path = self._codegen_paths()
+        try:
+            ocp.code_export_directory = code_export_dir.as_posix()
+        except AttributeError:
+            # Older acados_template builds may not expose this attribute.
+            pass
+        try:
+            ocp.code_gen_opts.code_export_directory = code_export_dir.as_posix()
+            ocp.code_gen_opts.json_file = json_path.as_posix()
+        except AttributeError:
+            # Keep compatibility with older acados_template versions that only
+            # expose the deprecated properties.
+            try:
+                ocp.json_file = json_path.as_posix()
+            except AttributeError:
+                pass
         ocp.dims.N = self.n_horizon
         ocp.dims.nx = nx
         ocp.dims.nu = nu
@@ -520,7 +560,8 @@ def run_tracking(
 
     if method == "nominal":
         model = Quadrotor3DNominalDynamics(env).model()
-        solver = MPC(model=model, n_horizon=n_horizon, t_horizon=t_horizon).solver
+        with working_directory(TRACKING_DIR):
+            solver = MPC(model=model, n_horizon=n_horizon, t_horizon=t_horizon).solver
     else:
         if method == "meta":
             ckpt_path = Path(checkpoint_path or DEFAULT_META_CHECKPOINT_PATH)
@@ -539,17 +580,23 @@ def run_tracking(
 
         for param in residual_mlp.parameters():
             param.requires_grad = False
-        l4c_residual = l4c.L4CasADi(residual_mlp, name="residual_quadrotor3D", mutable=True)
+        l4c_residual = l4c.L4CasADi(
+            residual_mlp,
+            name="residual_quadrotor3D",
+            build_dir=DEFAULT_L4C_BUILD_DIR.as_posix(),
+            mutable=True,
+        )
         residual_optimizer = torch.optim.Adam(residual_mlp.parameters(), lr=1e-3)
         residual_criterion = nn.MSELoss()
         model = Quadrotor3DLearnedDynamics(env, l4c_residual).model()
-        solver = MPC(
-            model=model,
-            n_horizon=n_horizon,
-            t_horizon=t_horizon,
-            external_shared_lib_dir=l4c_residual.shared_lib_dir,
-            external_shared_lib_name=l4c_residual.name,
-        ).solver
+        with working_directory(TRACKING_DIR):
+            solver = MPC(
+                model=model,
+                n_horizon=n_horizon,
+                t_horizon=t_horizon,
+                external_shared_lib_dir=l4c_residual.shared_lib_dir,
+                external_shared_lib_name=l4c_residual.name,
+            ).solver
 
     nominal_func = cs.Function("f_nominal", [model.x, model.u], [model.f_nominal])
     x_history = [xt.copy()]
