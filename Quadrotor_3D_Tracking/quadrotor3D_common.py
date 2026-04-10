@@ -41,6 +41,7 @@ NOMINAL_RATIOS = {
 }
 DEFAULT_META_DATASET_PATH = TRACKING_DIR / "meta_dataset_quadrotor3D" / "quadrotor3d_meta_residual_mpc.csv"
 DEFAULT_META_CHECKPOINT_PATH = TRACKING_DIR / "MetaLearning" / "maml_quadrotor3d_meta_init_3_128.pth"
+DEFAULT_META_FINAL_CHECKPOINT_PATH = TRACKING_DIR / "MetaLearning" / "maml_quadrotor3d_meta_init_3_128_final.pth"
 DEFAULT_RESULTS_DIR = TRACKING_DIR / "results"
 DEFAULT_ACADOS_EXPORT_DIR = TRACKING_DIR / "c_generated_code"
 DEFAULT_L4C_BUILD_DIR = TRACKING_DIR / "_l4c_generated"
@@ -68,6 +69,86 @@ class MLP(nn.Module):
         return self.net(x)
 
 
+class ContextResidualMLP(nn.Module):
+    def __init__(self, input_dim=16, output_dim=6, hidden_dim=128, num_layers=3, context_dim=6):
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.context_dim = context_dim
+        self.context_init = nn.Parameter(torch.zeros(context_dim))
+        self.context = nn.Parameter(torch.zeros(context_dim), requires_grad=False)
+
+        layers = [nn.Linear(input_dim + context_dim, hidden_dim), nn.ReLU()]
+        for _ in range(num_layers - 1):
+            layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.ReLU()])
+        layers.append(nn.Linear(hidden_dim, output_dim))
+        self.net = nn.Sequential(*layers)
+
+    def _expand_context(self, x, context):
+        if context.dim() == 1:
+            return context.unsqueeze(0).expand(x.shape[0], -1)
+        if context.dim() == 2 and context.shape[0] == 1 and x.shape[0] != 1:
+            return context.expand(x.shape[0], -1)
+        return context
+
+    def forward_with_context(self, x, context):
+        squeeze_output = False
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+            squeeze_output = True
+        context = self._expand_context(x, context.to(dtype=x.dtype, device=x.device))
+        output = self.net(torch.cat([x, context], dim=-1))
+        return output.squeeze(0) if squeeze_output else output
+
+    def forward(self, x):
+        return self.forward_with_context(x, self.context)
+
+    @torch.no_grad()
+    def set_context(self, context):
+        self.context.copy_(context.detach().to(dtype=self.context.dtype, device=self.context.device))
+
+    @torch.no_grad()
+    def reset_context(self):
+        self.context.copy_(self.context_init.detach())
+
+
+class SupportSetEncoder(nn.Module):
+    def __init__(self, feature_dim=16, target_dim=6, context_dim=4, hidden_dim=96, num_layers=2):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.target_dim = target_dim
+        self.context_dim = context_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+
+        layers = [nn.Linear(feature_dim + target_dim, hidden_dim), nn.ReLU()]
+        for _ in range(num_layers - 1):
+            layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.ReLU()])
+        self.sample_net = nn.Sequential(*layers)
+        self.head = nn.Sequential(
+            nn.Linear(2 * hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, context_dim),
+        )
+
+    def forward(self, features, targets):
+        if features.dim() == 1:
+            features = features.unsqueeze(0)
+        if targets.dim() == 1:
+            targets = targets.unsqueeze(0)
+        encoded = self.sample_net(torch.cat([features, targets], dim=-1))
+        pooled = torch.cat(
+            [
+                encoded.mean(dim=0, keepdim=True),
+                encoded.std(dim=0, keepdim=True, unbiased=False),
+            ],
+            dim=-1,
+        )
+        return self.head(pooled)
+
+
 @contextmanager
 def working_directory(path: Path):
     """Temporarily switch cwd so generated artifacts stay inside the tracking folder."""
@@ -86,6 +167,86 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def resolve_meta_checkpoint_path(checkpoint_path: Path | None = None) -> Path:
+    if checkpoint_path is not None:
+        return Path(checkpoint_path)
+
+    if DEFAULT_META_CHECKPOINT_PATH.exists():
+        return DEFAULT_META_CHECKPOINT_PATH
+    return DEFAULT_META_FINAL_CHECKPOINT_PATH
+
+
+def resolve_online_adaptation_config(
+    method: str,
+    dt: float,
+    checkpoint: dict | None,
+    batch_size: int | None,
+    adaptation_steps: int | None,
+    adaptation_interval_sec: float | None,
+) -> tuple[int, int, float]:
+    if method == "meta" and checkpoint is not None:
+        model_type = checkpoint.get("model_type", "maml")
+        support_window = int(checkpoint.get("support_window", 32))
+        inner_steps = 1 if model_type == "amortized_context_meta" else int(checkpoint.get("inner_steps", 1))
+        default_interval_sec = max(1.0, support_window * dt) if model_type == "amortized_context_meta" else max(dt, support_window * dt)
+        return (
+            support_window if batch_size is None else batch_size,
+            inner_steps if adaptation_steps is None else adaptation_steps,
+            default_interval_sec if adaptation_interval_sec is None else adaptation_interval_sec,
+        )
+
+    return (
+        96 if batch_size is None else batch_size,
+        10 if adaptation_steps is None else adaptation_steps,
+        1.0 if adaptation_interval_sec is None else adaptation_interval_sec,
+    )
+
+
+def build_meta_components_from_checkpoint(checkpoint: dict):
+    model_type = checkpoint.get("model_type", "maml")
+    if model_type == "context_meta":
+        model = ContextResidualMLP(
+            input_dim=checkpoint["input_dim"],
+            output_dim=checkpoint["output_dim"],
+            hidden_dim=checkpoint["hidden_dim"],
+            num_layers=checkpoint["num_layers"],
+            context_dim=checkpoint["context_dim"],
+        )
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.reset_context()
+        return model, None, model_type
+
+    if model_type == "amortized_context_meta":
+        model = ContextResidualMLP(
+            input_dim=checkpoint["input_dim"],
+            output_dim=checkpoint["output_dim"],
+            hidden_dim=checkpoint["hidden_dim"],
+            num_layers=checkpoint["num_layers"],
+            context_dim=checkpoint["context_dim"],
+        )
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.reset_context()
+        context_encoder = SupportSetEncoder(
+            feature_dim=checkpoint["input_dim"],
+            target_dim=checkpoint["output_dim"],
+            context_dim=checkpoint["context_dim"],
+            hidden_dim=checkpoint["context_encoder_hidden_dim"],
+            num_layers=checkpoint["context_encoder_num_layers"],
+        )
+        context_encoder.load_state_dict(checkpoint["context_encoder_state_dict"])
+        context_encoder.eval()
+        return model, context_encoder, model_type
+
+    model = MLP(
+        input_dim=checkpoint["input_dim"],
+        output_dim=checkpoint["output_dim"],
+        hidden_dim=checkpoint["hidden_dim"],
+        num_layers=checkpoint["num_layers"],
+    )
+    model.load_state_dict(checkpoint["model_state_dict"])
+    return model, None, model_type
 
 
 def wrap_angle(angle: float) -> float:
@@ -532,9 +693,9 @@ def run_tracking(
     checkpoint_path: Path | None = None,
     hidden_dim: int = 128,
     num_layers: int = 3,
-    batch_size: int = 64,
-    adaptation_steps: int = 20,
-    adaptation_interval_sec: float = 0.5,
+    batch_size: int | None = None,
+    adaptation_steps: int | None = None,
+    adaptation_interval_sec: float | None = None,
     t_horizon: float = 1.0,
     n_horizon: int = 20,
     sim_time: float = 12.0,
@@ -557,6 +718,11 @@ def run_tracking(
     l4c_residual = None
     residual_optimizer = None
     residual_criterion = None
+    checkpoint = None
+    context_inner_lr = None
+    context_model = False
+    context_encoder = None
+    amortized_context_model = False
 
     if method == "nominal":
         model = Quadrotor3DNominalDynamics(env).model()
@@ -564,17 +730,17 @@ def run_tracking(
             solver = MPC(model=model, n_horizon=n_horizon, t_horizon=t_horizon).solver
     else:
         if method == "meta":
-            ckpt_path = Path(checkpoint_path or DEFAULT_META_CHECKPOINT_PATH)
+            ckpt_path = resolve_meta_checkpoint_path(checkpoint_path)
             if not ckpt_path.exists():
                 raise FileNotFoundError(f"Meta checkpoint not found: {ckpt_path}")
+            print(f"Loading meta checkpoint: {ckpt_path}")
             checkpoint = torch.load(ckpt_path, map_location="cpu")
-            residual_mlp = MLP(
-                input_dim=checkpoint["input_dim"],
-                output_dim=checkpoint["output_dim"],
-                hidden_dim=checkpoint["hidden_dim"],
-                num_layers=checkpoint["num_layers"],
-            )
-            residual_mlp.load_state_dict(checkpoint["model_state_dict"])
+            residual_mlp, context_encoder, model_type = build_meta_components_from_checkpoint(checkpoint)
+            context_model = isinstance(residual_mlp, ContextResidualMLP)
+            amortized_context_model = model_type == "amortized_context_meta"
+            if context_model:
+                method_label = "metacontext"
+                context_inner_lr = float(checkpoint.get("inner_lr", 5e-2))
         else:
             residual_mlp = MLP(input_dim=16, output_dim=6, hidden_dim=hidden_dim, num_layers=num_layers)
 
@@ -586,7 +752,8 @@ def run_tracking(
             build_dir=DEFAULT_L4C_BUILD_DIR.as_posix(),
             mutable=True,
         )
-        residual_optimizer = torch.optim.Adam(residual_mlp.parameters(), lr=1e-3)
+        if not context_model or not amortized_context_model:
+            residual_optimizer = torch.optim.Adam(residual_mlp.parameters(), lr=1e-3)
         residual_criterion = nn.MSELoss()
         model = Quadrotor3DLearnedDynamics(env, l4c_residual).model()
         with working_directory(TRACKING_DIR):
@@ -597,6 +764,39 @@ def run_tracking(
                 external_shared_lib_dir=l4c_residual.shared_lib_dir,
                 external_shared_lib_name=l4c_residual.name,
             ).solver
+
+    batch_size, adaptation_steps, adaptation_interval_sec = resolve_online_adaptation_config(
+        method=method,
+        dt=dt,
+        checkpoint=checkpoint,
+        batch_size=batch_size,
+        adaptation_steps=adaptation_steps,
+        adaptation_interval_sec=adaptation_interval_sec,
+    )
+    if method != "nominal":
+        if amortized_context_model:
+            print(
+                "Online encoded-context config: "
+                f"batch_size={batch_size}, "
+                f"interval={adaptation_interval_sec:.2f}s, "
+                f"context_dim={residual_mlp.context_dim}"
+            )
+        elif context_model:
+            print(
+                "Online latent adaptation config: "
+                f"batch_size={batch_size}, "
+                f"steps={adaptation_steps}, "
+                f"interval={adaptation_interval_sec:.2f}s, "
+                f"context_dim={residual_mlp.context_dim}, "
+                f"inner_lr={context_inner_lr:.4f}"
+            )
+        else:
+            print(
+                "Online adaptation config: "
+                f"batch_size={batch_size}, "
+                f"steps={adaptation_steps}, "
+                f"interval={adaptation_interval_sec:.2f}s"
+            )
 
     nominal_func = cs.Function("f_nominal", [model.x, model.u], [model.f_nominal])
     x_history = [xt.copy()]
@@ -638,15 +838,27 @@ def run_tracking(
             if step_idx > 0 and step_idx % adapt_every_steps == 0 and len(feature_buffer) >= batch_size:
                 x_batch = torch.tensor(np.array(feature_buffer[-batch_size:]), dtype=torch.float32)
                 y_batch = torch.tensor(np.array(target_buffer[-batch_size:]), dtype=torch.float32)
-                for param in residual_mlp.parameters():
-                    param.requires_grad = True
-                for _ in range(adaptation_steps):
-                    residual_optimizer.zero_grad()
-                    loss = residual_criterion(residual_mlp(x_batch), y_batch)
-                    loss.backward()
-                    residual_optimizer.step()
-                for param in residual_mlp.parameters():
-                    param.requires_grad = False
+                if amortized_context_model:
+                    with torch.no_grad():
+                        context = context_encoder(x_batch, y_batch).squeeze(0)
+                    residual_mlp.set_context(context)
+                elif context_model:
+                    context = residual_mlp.context.detach().clone().requires_grad_(True)
+                    for _ in range(adaptation_steps):
+                        loss = residual_criterion(residual_mlp.forward_with_context(x_batch, context), y_batch)
+                        grad, = torch.autograd.grad(loss, context)
+                        context = context - context_inner_lr * grad
+                    residual_mlp.set_context(context)
+                else:
+                    for param in residual_mlp.parameters():
+                        param.requires_grad = True
+                    for _ in range(adaptation_steps):
+                        residual_optimizer.zero_grad()
+                        loss = residual_criterion(residual_mlp(x_batch), y_batch)
+                        loss.backward()
+                        residual_optimizer.step()
+                    for param in residual_mlp.parameters():
+                        param.requires_grad = False
                 l4c_residual.update(residual_mlp)
 
         if done:
