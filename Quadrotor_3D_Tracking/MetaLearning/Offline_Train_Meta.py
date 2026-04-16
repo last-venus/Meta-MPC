@@ -1,5 +1,6 @@
-"""Train a fast context-encoder meta-residual model for 3D quadrotor tracking."""
+"""Train a faster and more discriminative context-meta residual model."""
 
+import argparse
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -125,7 +126,20 @@ def has_valid_rollout(task_rollouts, support_window, query_horizon):
     return has_support and has_query
 
 
-def sample_support_query_rollouts(task_rollouts, support_window, query_horizon, rng=None):
+def sample_window(rollout, window_size, rng, excluded_start=None):
+    max_start = rollout["features"].size(0) - window_size
+    if max_start < 0:
+        raise ValueError("Rollout is shorter than the requested window.")
+    if max_start == 0:
+        return 0, window_size
+
+    start = int(rng.integers(0, max_start + 1))
+    if excluded_start is not None and max_start >= 1 and start == excluded_start:
+        start = (start + 1 + int(rng.integers(0, max_start))) % (max_start + 1)
+    return start, start + window_size
+
+
+def sample_support_pair_query(task_rollouts, support_window, query_horizon, rng=None):
     rng = rng or np.random.default_rng()
     support_candidates = [rollout for rollout in task_rollouts if rollout["features"].size(0) >= support_window]
     query_candidates = [rollout for rollout in task_rollouts if rollout["features"].size(0) >= query_horizon]
@@ -133,6 +147,13 @@ def sample_support_query_rollouts(task_rollouts, support_window, query_horizon, 
         return None
 
     support_rollout = support_candidates[int(rng.integers(0, len(support_candidates)))]
+    alternate_support_candidates = [
+        rollout for rollout in support_candidates if rollout["reference_id"] != support_rollout["reference_id"]
+    ]
+    if not alternate_support_candidates:
+        alternate_support_candidates = support_candidates
+    alternate_support_rollout = alternate_support_candidates[int(rng.integers(0, len(alternate_support_candidates)))]
+
     preferred_query_candidates = [
         rollout for rollout in query_candidates if rollout["reference_id"] != support_rollout["reference_id"]
     ]
@@ -140,14 +161,20 @@ def sample_support_query_rollouts(task_rollouts, support_window, query_horizon, 
         query_candidates = preferred_query_candidates
     query_rollout = query_candidates[int(rng.integers(0, len(query_candidates)))]
 
-    support_start = int(rng.integers(0, support_rollout["features"].size(0) - support_window + 1))
-    query_start = int(rng.integers(0, query_rollout["features"].size(0) - query_horizon + 1))
-    support_end = support_start + support_window
-    query_end = query_start + query_horizon
+    support_start, support_end = sample_window(support_rollout, support_window, rng)
+    alt_support_start, alt_support_end = sample_window(
+        alternate_support_rollout,
+        support_window,
+        rng,
+        excluded_start=support_start if alternate_support_rollout is support_rollout else None,
+    )
+    query_start, query_end = sample_window(query_rollout, query_horizon, rng)
 
     return (
         support_rollout["features"][support_start:support_end],
         support_rollout["targets"][support_start:support_end],
+        alternate_support_rollout["features"][alt_support_start:alt_support_end],
+        alternate_support_rollout["targets"][alt_support_start:alt_support_end],
         {
             "features": query_rollout["features"][query_start:query_end],
             "targets": query_rollout["targets"][query_start:query_end],
@@ -183,7 +210,6 @@ def nominal_dynamics_torch(state, action):
     p_body = state[..., 9]
     q_body = state[..., 10]
     r_body = state[..., 11]
-
     f1 = action[..., 0]
     f2 = action[..., 1]
     f3 = action[..., 2]
@@ -287,16 +313,42 @@ def one_step_state_loss(pred_next_state, target_next_state):
     return pos_loss, vel_loss, att_loss, rate_loss
 
 
+def symmetric_contrastive_loss(context_a_batch, context_b_batch, temperature):
+    if context_a_batch.size(0) <= 1:
+        return context_a_batch.new_tensor(0.0)
+
+    norm_a = F.normalize(context_a_batch, dim=-1)
+    norm_b = F.normalize(context_b_batch, dim=-1)
+    logits_ab = norm_a @ norm_b.transpose(0, 1) / temperature
+    labels = torch.arange(logits_ab.size(0), device=logits_ab.device)
+    return 0.5 * (F.cross_entropy(logits_ab, labels) + F.cross_entropy(logits_ab.transpose(0, 1), labels))
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train the quadrotor amortized-context meta model.")
+    parser.add_argument("--csv-path", type=Path, default=DEFAULT_META_DATASET_PATH, help="Path to the meta dataset CSV.")
+    parser.add_argument("--save-path", type=Path, default=DEFAULT_META_CHECKPOINT_PATH, help="Path to save the best checkpoint.")
+    parser.add_argument("--epochs", type=int, default=550, help="Number of meta-training epochs.")
+    parser.add_argument("--meta-batch-size", type=int, default=None, help="Meta-batch size. Defaults to min(24, n_train_tasks).")
+    parser.add_argument("--support-window", type=int, default=32, help="Support-set window size.")
+    parser.add_argument("--query-horizon", type=int, default=16, help="Query horizon length.")
+    parser.add_argument("--val-interval", type=int, default=25, help="Validation interval in epochs.")
+    return parser.parse_args()
+
+
 def evaluate_meta_loss(residual_model, context_encoder, val_task_data, support_window, query_horizon, dt, device, loss_cfg):
     if not val_task_data:
         return None, None
 
-    losses = []
+    task_losses = []
     components = {
         "query_residual": [],
         "query_state": [],
         "context": [],
+        "consistency": [],
     }
+    context_a_batch = []
+    context_b_batch = []
 
     for task_id, task_entry in val_task_data.items():
         task_rollouts = task_entry["rollouts"]
@@ -305,17 +357,20 @@ def evaluate_meta_loss(residual_model, context_encoder, val_task_data, support_w
             continue
 
         rng = np.random.default_rng(43 + int(task_id))
-        sampled = sample_support_query_rollouts(task_rollouts, support_window, query_horizon, rng=rng)
+        sampled = sample_support_pair_query(task_rollouts, support_window, query_horizon, rng=rng)
         if sampled is None:
             continue
 
-        x_support, y_support, query_batch = sampled
+        x_support, y_support, x_support_alt, y_support_alt, query_batch = sampled
         x_support = x_support.to(device)
         y_support = y_support.to(device)
+        x_support_alt = x_support_alt.to(device)
+        y_support_alt = y_support_alt.to(device)
         query_batch = {name: value.to(device) for name, value in query_batch.items()}
 
-        context = context_encoder(x_support, y_support)
-        query_pred = residual_model.forward_with_context(query_batch["features"], context)
+        context_a = context_encoder(x_support, y_support)
+        context_b = context_encoder(x_support_alt, y_support_alt)
+        query_pred = residual_model.forward_with_context(query_batch["features"], context_a)
         query_residual_loss = F.mse_loss(query_pred, query_batch["targets"])
 
         pred_next_state = rollout_step_torch(query_batch["states"], query_batch["actions"], query_pred, dt=dt)
@@ -326,26 +381,41 @@ def evaluate_meta_loss(residual_model, context_encoder, val_task_data, support_w
             + loss_cfg["attitude_weight"] * att_loss
             + loss_cfg["rate_weight"] * rate_loss
         )
-        context_loss = F.mse_loss(context.squeeze(0), task_context)
+        context_loss = 0.5 * (
+            F.mse_loss(context_a.squeeze(0), task_context) + F.mse_loss(context_b.squeeze(0), task_context)
+        )
+        consistency_loss = F.mse_loss(context_a, context_b)
         total_loss = (
             loss_cfg["query_residual_weight"] * query_residual_loss
             + loss_cfg["query_state_weight"] * query_state_loss
             + loss_cfg["context_weight"] * context_loss
+            + loss_cfg["consistency_weight"] * consistency_loss
         )
 
-        losses.append(total_loss.detach().item())
+        task_losses.append(total_loss.detach().item())
         components["query_residual"].append(query_residual_loss.detach().item())
         components["query_state"].append(query_state_loss.detach().item())
         components["context"].append(context_loss.detach().item())
+        components["consistency"].append(consistency_loss.detach().item())
+        context_a_batch.append(context_a.squeeze(0))
+        context_b_batch.append(context_b.squeeze(0))
 
-    if not losses:
+    if not task_losses:
         return None, None
+    contrastive_loss = symmetric_contrastive_loss(
+        torch.stack(context_a_batch, dim=0),
+        torch.stack(context_b_batch, dim=0),
+        temperature=loss_cfg["contrastive_temperature"],
+    )
     mean_components = {name: float(np.mean(values)) for name, values in components.items() if values}
-    return float(np.mean(losses)), mean_components
+    mean_components["contrastive"] = float(contrastive_loss.detach().item())
+    total_loss = float(np.mean(task_losses) + loss_cfg["contrastive_weight"] * contrastive_loss.detach().item())
+    return total_loss, mean_components
 
 
 def main():
-    csv_path = DEFAULT_META_DATASET_PATH
+    args = parse_args()
+    csv_path = args.csv_path
     if not csv_path.exists():
         raise FileNotFoundError(f"Meta-dataset not found: {csv_path}")
 
@@ -357,21 +427,29 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    epochs = 700
-    meta_batch_size = min(24, len(train_task_data))
-    support_window = 32
-    query_horizon = 16
-    val_interval = 25
+    epochs = args.epochs
+    meta_batch_size = min(24, len(train_task_data)) if args.meta_batch_size is None else min(args.meta_batch_size, len(train_task_data))
+    support_window = args.support_window
+    query_horizon = args.query_horizon
+    val_interval = args.val_interval
     hidden_dim = 128
     num_layers = 3
-    context_encoder_hidden_dim = 96
+    context_encoder_hidden_dim = 80
     context_encoder_num_layers = 2
     meta_lr = 5e-4
     rollout_dt = DATA_DT
+    context_injection = "adapter"
+    modulation_scale = 0.20
+    online_context_ema_decay = 0.72
+    online_context_warmup_updates = 1
+    grad_clip_norm = 5.0
     loss_cfg = {
         "query_residual_weight": 1.0,
         "query_state_weight": 0.35,
         "context_weight": 0.15,
+        "consistency_weight": 0.10,
+        "contrastive_weight": 0.06,
+        "contrastive_temperature": 0.35,
         "position_weight": 1.6,
         "velocity_weight": 0.20,
         "attitude_weight": 0.35,
@@ -384,6 +462,8 @@ def main():
         hidden_dim=hidden_dim,
         num_layers=num_layers,
         context_dim=CONTEXT_DIM,
+        context_injection=context_injection,
+        modulation_scale=modulation_scale,
     ).to(device)
     context_encoder = SupportSetEncoder(
         feature_dim=INPUT_DIM,
@@ -396,6 +476,7 @@ def main():
         list(residual_model.parameters()) + list(context_encoder.parameters()),
         lr=meta_lr,
     )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
 
     train_losses = []
     val_epochs = []
@@ -407,18 +488,21 @@ def main():
 
     print(
         f"Fast context-meta config: residual_hidden={hidden_dim}, encoder_hidden={context_encoder_hidden_dim}, "
-        f"context_dim={CONTEXT_DIM}, support={support_window}, query={query_horizon}, epochs={epochs}"
+        f"context_dim={CONTEXT_DIM}, support={support_window}, query={query_horizon}, epochs={epochs}, "
+        f"context_injection={context_injection}, ema={online_context_ema_decay:.2f}"
     )
 
     for epoch in range(epochs):
         optimizer.zero_grad()
-        meta_loss = 0.0
-        n_tasks_used = 0
+        task_losses = []
         train_components = {
             "query_residual": [],
             "query_state": [],
             "context": [],
+            "consistency": [],
         }
+        context_a_batch = []
+        context_b_batch = []
         task_ids = np.random.choice(list(train_task_data.keys()), meta_batch_size, replace=False)
 
         for task_id in task_ids:
@@ -428,17 +512,20 @@ def main():
             if not has_valid_rollout(task_rollouts, support_window, query_horizon):
                 continue
 
-            sampled = sample_support_query_rollouts(task_rollouts, support_window, query_horizon)
+            sampled = sample_support_pair_query(task_rollouts, support_window, query_horizon)
             if sampled is None:
                 continue
 
-            x_support, y_support, query_batch = sampled
+            x_support, y_support, x_support_alt, y_support_alt, query_batch = sampled
             x_support = x_support.to(device)
             y_support = y_support.to(device)
+            x_support_alt = x_support_alt.to(device)
+            y_support_alt = y_support_alt.to(device)
             query_batch = {name: value.to(device) for name, value in query_batch.items()}
 
-            context = context_encoder(x_support, y_support)
-            query_pred = residual_model.forward_with_context(query_batch["features"], context)
+            context_a = context_encoder(x_support, y_support)
+            context_b = context_encoder(x_support_alt, y_support_alt)
+            query_pred = residual_model.forward_with_context(query_batch["features"], context_a)
             query_residual_loss = F.mse_loss(query_pred, query_batch["targets"])
 
             pred_next_state = rollout_step_torch(query_batch["states"], query_batch["actions"], query_pred, dt=rollout_dt)
@@ -449,28 +536,46 @@ def main():
                 + loss_cfg["attitude_weight"] * att_loss
                 + loss_cfg["rate_weight"] * rate_loss
             )
-            context_loss = F.mse_loss(context.squeeze(0), task_context)
+            context_loss = 0.5 * (
+                F.mse_loss(context_a.squeeze(0), task_context) + F.mse_loss(context_b.squeeze(0), task_context)
+            )
+            consistency_loss = F.mse_loss(context_a, context_b)
             task_loss = (
                 loss_cfg["query_residual_weight"] * query_residual_loss
                 + loss_cfg["query_state_weight"] * query_state_loss
                 + loss_cfg["context_weight"] * context_loss
+                + loss_cfg["consistency_weight"] * consistency_loss
             )
 
-            meta_loss = meta_loss + task_loss
-            n_tasks_used += 1
+            task_losses.append(task_loss)
             train_components["query_residual"].append(query_residual_loss.detach().item())
             train_components["query_state"].append(query_state_loss.detach().item())
             train_components["context"].append(context_loss.detach().item())
+            train_components["consistency"].append(consistency_loss.detach().item())
+            context_a_batch.append(context_a.squeeze(0))
+            context_b_batch.append(context_b.squeeze(0))
 
-        if n_tasks_used == 0:
+        if not task_losses:
             continue
 
-        meta_loss = meta_loss / n_tasks_used
+        mean_task_loss = torch.stack(task_losses).mean()
+        contrastive_loss = symmetric_contrastive_loss(
+            torch.stack(context_a_batch, dim=0),
+            torch.stack(context_b_batch, dim=0),
+            temperature=loss_cfg["contrastive_temperature"],
+        )
+        meta_loss = mean_task_loss + loss_cfg["contrastive_weight"] * contrastive_loss
         current_meta_loss = meta_loss.item()
         current_train_components = {name: float(np.mean(values)) for name, values in train_components.items() if values}
+        current_train_components["contrastive"] = float(contrastive_loss.detach().item())
 
         meta_loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            list(residual_model.parameters()) + list(context_encoder.parameters()),
+            max_norm=grad_clip_norm,
+        )
         optimizer.step()
+        scheduler.step()
         train_losses.append(current_meta_loss)
 
         current_val_loss = None
@@ -508,6 +613,8 @@ def main():
                     f" | q_res={current_train_components['query_residual']:.5f}"
                     f" q_state={current_train_components['query_state']:.5f}"
                     f" ctx={current_train_components['context']:.5f}"
+                    f" cons={current_train_components['consistency']:.5f}"
+                    f" ctr={current_train_components['contrastive']:.5f}"
                 )
             if current_val_loss is not None:
                 log_msg += f" | Val Loss: {current_val_loss:.6f}"
@@ -516,6 +623,8 @@ def main():
                     f" | val_q_res={current_val_components['query_residual']:.5f}"
                     f" val_q_state={current_val_components['query_state']:.5f}"
                     f" val_ctx={current_val_components['context']:.5f}"
+                    f" val_cons={current_val_components['consistency']:.5f}"
+                    f" val_ctr={current_val_components['contrastive']:.5f}"
                 )
             if best_residual_state is not None:
                 log_msg += f" | Best Val: {best_val_loss:.6f} @ epoch {best_val_epoch}"
@@ -526,7 +635,7 @@ def main():
     effective_residual_state = best_residual_state if best_residual_state is not None else residual_model.state_dict()
     effective_encoder_state = best_encoder_state if best_encoder_state is not None else context_encoder.state_dict()
 
-    save_path = DEFAULT_META_CHECKPOINT_PATH
+    save_path = args.save_path
     save_path.parent.mkdir(parents=True, exist_ok=True)
     final_path = save_path.with_name(f"{save_path.stem}_final{save_path.suffix}")
 
@@ -539,16 +648,21 @@ def main():
         "hidden_dim": hidden_dim,
         "num_layers": num_layers,
         "context_dim": CONTEXT_DIM,
+        "context_injection": context_injection,
+        "modulation_scale": modulation_scale,
         "context_encoder_hidden_dim": context_encoder_hidden_dim,
         "context_encoder_num_layers": context_encoder_num_layers,
         "support_window": support_window,
         "query_horizon": query_horizon,
         "inner_steps": 1,
         "inner_lr": 0.0,
+        "online_context_ema_decay": online_context_ema_decay,
+        "online_context_warmup_updates": online_context_warmup_updates,
         "rollout_dt": rollout_dt,
         "loss_cfg": loss_cfg,
         "context_center": CONTEXT_CENTER.tolist(),
         "context_scale": CONTEXT_SCALE.tolist(),
+        "command_mode": "motor_thrust",
         "best_val_loss": None if best_residual_state is None else best_val_loss,
         "best_val_epoch": None if best_residual_state is None else best_val_epoch,
     }
@@ -572,7 +686,7 @@ def main():
         plt.plot(val_epochs, val_losses, label="val", linewidth=1.5)
     plt.xlabel("Epoch")
     plt.ylabel("Meta Loss")
-    plt.title(f"Fast Context-Meta Loss (Quadrotor3D, {epochs} epochs)")
+    plt.title(f"Fast Context-Meta Loss (Quadrotor3D Motor Thrust, {epochs} epochs)")
     plt.grid(True)
     plt.yscale("log")
     plt.legend()

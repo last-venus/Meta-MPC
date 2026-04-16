@@ -25,13 +25,15 @@ if str(TRACKING_DIR) not in sys.path:
     sys.path.insert(0, str(TRACKING_DIR))
 
 from quadrotor3D_common import ReferenceConfig, Quadrotor3DNominalDynamics, MPC, make_env_config, reference_state  # noqa: E402
+from quadrotor3D_common import DEFAULT_META_DATASET_PATH, control_labels, input_reference  # noqa: E402
 from safe_control_gym.envs.gym_pybullet_drones.quadrotor import Quadrotor  # noqa: E402
 
 
 np.random.seed(43)
 OUTPUT_DIR = TRACKING_DIR / "meta_dataset_quadrotor3D"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-SAVE_PATH = OUTPUT_DIR / "quadrotor3d_meta_residual_mpc.csv"
+SAVE_PATH = DEFAULT_META_DATASET_PATH
+ACTION_COLS = control_labels()
 
 # 下面这些比例网格定义了元训练阶段会看到的动力学分布。
 # 这里显式覆盖默认评测附近的 1.25 惯量比，同时保留更轻和更重的变化。
@@ -42,15 +44,48 @@ IZZ_RATIOS = np.array([0.8, 1.0, 1.25])
 
 # 每个 task_id 对应一种真实动力学；同一个 task 内再覆盖多类参考轨迹，
 # 这样 latent context 更接近“环境/动力学身份”，而不是把轨迹本身混成 task。
+def circle_reference_for_speed(radius: float, speed_mps: float, center=(0.0, 0.0, 1.0), yaw_ref: float = 0.0) -> ReferenceConfig:
+    return ReferenceConfig(
+        period=2.0 * np.pi * radius / speed_mps,
+        radius=radius,
+        center=center,
+        z_amp=0.0,
+        yaw_ref=yaw_ref,
+        traj_type="circle",
+    )
+
+
 REFERENCE_TASKS = [
     # 默认评测轨迹，保证 meta 初始化真正见过测试分布中心。
     ReferenceConfig(period=12.0, radius=0.60, center=(0.0, 0.0, 1.0), z_amp=0.15, yaw_ref=0.0),
     # 同中心但更快、更强 z 激励，增加速度和姿态需求。
     ReferenceConfig(period=10.0, radius=0.60, center=(0.0, 0.0, 1.0), z_amp=0.18, yaw_ref=0.0),
-    # 轻微平移和 yaw 偏置，让任务不只围绕单个原点圆轨迹。
-    ReferenceConfig(period=12.0, radius=0.45, center=(0.25, -0.25, 1.1), z_amp=0.18, yaw_ref=0.2),
-    # 更大半径和更强 z 起伏，给 residual 学习更多非线性闭环场景。
-    ReferenceConfig(period=9.0, radius=0.72, center=(-0.3, 0.2, 0.95), z_amp=0.22, yaw_ref=-0.2),
+    # 居中的 8 字轨迹，让 latent 学会区分“动力学身份”和“轨迹拓扑”。
+    ReferenceConfig(
+        period=12.0,
+        radius=0.60,
+        y_radius=0.45,
+        center=(0.0, 0.0, 1.0),
+        z_amp=0.15,
+        yaw_ref=0.0,
+        traj_type="figure8",
+    ),
+    # 平移后的 8 字轨迹，进一步减少 latent 记住单一起点或中心位置的机会。
+    ReferenceConfig(
+        period=10.0,
+        radius=0.52,
+        y_radius=0.40,
+        center=(0.2, -0.15, 1.05),
+        z_amp=0.18,
+        yaw_ref=0.1,
+        traj_type="figure8",
+    ),
+    # 给 meta 明确补进大半径纯圆，避免 r=3 高速 sweep 完全落在训练分布之外。
+    # 这里同时放一个中速桥接点和 3/4/5 m/s 三个高动态点。
+    circle_reference_for_speed(radius=3.0, speed_mps=2.0),
+    circle_reference_for_speed(radius=3.0, speed_mps=3.0),
+    circle_reference_for_speed(radius=3.0, speed_mps=4.0),
+    circle_reference_for_speed(radius=3.0, speed_mps=5.0),
 ]
 
 # BASE_* 表示控制器内部 nominal model 默认使用的参数。
@@ -67,6 +102,23 @@ T_HORIZON = 1.0
 EPISODES_PER_REFERENCE = 1
 
 
+def zero_init_randomization() -> dict:
+    return {
+        "init_x": {"distrib": "uniform", "low": 0.0, "high": 0.0},
+        "init_x_dot": {"distrib": "uniform", "low": 0.0, "high": 0.0},
+        "init_y": {"distrib": "uniform", "low": 0.0, "high": 0.0},
+        "init_y_dot": {"distrib": "uniform", "low": 0.0, "high": 0.0},
+        "init_z": {"distrib": "uniform", "low": 0.0, "high": 0.0},
+        "init_z_dot": {"distrib": "uniform", "low": 0.0, "high": 0.0},
+        "init_phi": {"distrib": "uniform", "low": 0.0, "high": 0.0},
+        "init_theta": {"distrib": "uniform", "low": 0.0, "high": 0.0},
+        "init_psi": {"distrib": "uniform", "low": 0.0, "high": 0.0},
+        "init_p": {"distrib": "uniform", "low": 0.0, "high": 0.0},
+        "init_q": {"distrib": "uniform", "low": 0.0, "high": 0.0},
+        "init_r": {"distrib": "uniform", "low": 0.0, "high": 0.0},
+    }
+
+
 def collect_episode(task_id, episode_id, reference_id, inertial_prop, ref_cfg):
     """为单个任务采集一整条 rollout 的监督数据。
 
@@ -81,7 +133,18 @@ def collect_episode(task_id, episode_id, reference_id, inertial_prop, ref_cfg):
         一个 Python 列表，列表中的每个元素对应 CSV 里的一行样本。
     """
     # 用当前任务对应的“真实惯性参数”创建仿真环境。
-    env = Quadrotor(**make_env_config(seed=task_id * 100 + episode_id, gui=False, done_on_out_of_bound=False, episode_len_sec=T, inertial_prop=inertial_prop))
+    init_state = reference_state(0.0, ref_cfg)
+    env = Quadrotor(
+        **make_env_config(
+            seed=task_id * 100 + episode_id,
+            gui=False,
+            done_on_out_of_bound=False,
+            episode_len_sec=T,
+            inertial_prop=inertial_prop,
+            init_state=init_state,
+            init_state_randomization_info=zero_init_randomization(),
+        )
+    )
     rows = []
     try:
         # 构造 MPC 内部使用的 nominal dynamics。
@@ -91,6 +154,7 @@ def collect_episode(task_id, episode_id, reference_id, inertial_prop, ref_cfg):
         # 把名义动力学封装成可调用的 CasADi 函数，后面打标签时要用它来计算 nominal 预测。
         nominal_func = cs.Function("f_nom", [model.x, model.u], [model.f_nominal])
         solver = MPC(model=model, n_horizon=N, t_horizon=T_HORIZON).solver
+        u_ref = input_reference()
 
         obs, _ = env.reset()
         # 这里只取前 12 维，也就是 3D 四旋翼状态：
@@ -105,7 +169,7 @@ def collect_episode(task_id, episode_id, reference_id, inertial_prop, ref_cfg):
                 x_ref_k = reference_state(current_time + k * T_HORIZON / N, ref_cfg)
                 # 对 LINEAR_LS 代价来说，acados 的 yref 形式是 [state_ref, control_ref]。
                 # 这里控制参考设成 0，所以在状态参考后拼接 4 个 0。
-                solver.set(k, "yref", np.concatenate([x_ref_k, np.zeros(4)]))
+                solver.set(k, "yref", np.concatenate([x_ref_k, u_ref]))
 
             # 终端时刻的状态参考。
             solver.set(N, "yref", reference_state(current_time + T_HORIZON, ref_cfg))
@@ -148,6 +212,7 @@ def collect_episode(task_id, episode_id, reference_id, inertial_prop, ref_cfg):
                 task_id, episode_id, reference_id, step * DT,
                 inertial_prop[0] / BASE_MASS, inertial_prop[1] / BASE_IXX, inertial_prop[2] / BASE_IYY, inertial_prop[3] / BASE_IZZ,
                 ref_cfg.center[0], ref_cfg.center[1], ref_cfg.center[2], ref_cfg.radius, ref_cfg.z_amp, ref_cfg.yaw_ref, ref_cfg.period,
+                ref_cfg.traj_type, ref_cfg.radius if ref_cfg.y_radius is None else ref_cfg.y_radius,
                 *x, *u, *true_targets, *nominal_targets, *residual_targets,
                 env.MASS, env.J[0, 0], env.J[1, 1], env.J[2, 2],
             ])
@@ -166,7 +231,14 @@ def collect_task_rollouts(task_spec):
     episode_id = 0
     for reference_id, ref_cfg in enumerate(REFERENCE_TASKS):
         for _ in range(EPISODES_PER_REFERENCE):
-            rows.extend(collect_episode(task_id, episode_id, reference_id, inertial_prop, ref_cfg))
+            try:
+                rows.extend(collect_episode(task_id, episode_id, reference_id, inertial_prop, ref_cfg))
+            except RuntimeError as exc:
+                print(
+                    f"[warn] skip rollout task={task_id} episode={episode_id} ref={reference_id} "
+                    f"traj={ref_cfg.traj_type} radius={ref_cfg.radius:.2f} period={ref_cfg.period:.3f}: {exc}",
+                    flush=True,
+                )
             episode_id += 1
     return task_id, mass_ratio, ixx_ratio, iyy_ratio, izz_ratio, rows
 
@@ -243,9 +315,9 @@ def main(workers: int, max_tasks: int | None = None):
     # - 环境真实惯性参数
     columns = [
         "task_id", "episode_id", "reference_id", "time", "mass_ratio", "ixx_ratio", "iyy_ratio", "izz_ratio",
-        "center_x", "center_y", "center_z", "radius", "z_amp", "yaw_ref", "period",
+        "center_x", "center_y", "center_z", "radius", "z_amp", "yaw_ref", "period", "traj_type", "y_radius",
         "x", "x_dot", "y", "y_dot", "z", "z_dot", "phi", "theta", "psi", "p", "q", "r",
-        "u1", "u2", "u3", "u4",
+        *ACTION_COLS,
         "x_ddot_true", "y_ddot_true", "z_ddot_true", "p_dot_true", "q_dot_true", "r_dot_true",
         "x_ddot_nom", "y_ddot_nom", "z_ddot_nom", "p_dot_nom", "q_dot_nom", "r_dot_nom",
         "res_x_ddot", "res_y_ddot", "res_z_ddot", "res_p_dot", "res_q_dot", "res_r_dot",

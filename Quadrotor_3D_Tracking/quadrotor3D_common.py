@@ -45,6 +45,7 @@ DEFAULT_META_FINAL_CHECKPOINT_PATH = TRACKING_DIR / "MetaLearning" / "maml_quadr
 DEFAULT_RESULTS_DIR = TRACKING_DIR / "results"
 DEFAULT_ACADOS_EXPORT_DIR = TRACKING_DIR / "c_generated_code"
 DEFAULT_L4C_BUILD_DIR = TRACKING_DIR / "_l4c_generated"
+COMMAND_MODE_MOTOR_THRUST = "motor_thrust"
 
 
 @dataclass
@@ -54,6 +55,8 @@ class ReferenceConfig:
     center: tuple[float, float, float] = (0.0, 0.0, 1.0)
     z_amp: float = 0.15
     yaw_ref: float = 0.0
+    traj_type: str = "circle"
+    y_radius: float | None = None
 
 
 class MLP(nn.Module):
@@ -70,21 +73,49 @@ class MLP(nn.Module):
 
 
 class ContextResidualMLP(nn.Module):
-    def __init__(self, input_dim=16, output_dim=6, hidden_dim=128, num_layers=3, context_dim=6):
+    def __init__(
+        self,
+        input_dim=16,
+        output_dim=6,
+        hidden_dim=128,
+        num_layers=3,
+        context_dim=6,
+        context_injection="concat",
+        modulation_scale=0.25,
+    ):
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.context_dim = context_dim
+        self.context_injection = context_injection
+        self.modulation_scale = modulation_scale
         self.context_init = nn.Parameter(torch.zeros(context_dim))
         self.context = nn.Parameter(torch.zeros(context_dim), requires_grad=False)
+        self.net = None
+        self.input_layer = None
+        self.hidden_layers = None
+        self.pre_head = None
+        self.context_scale_layer = None
+        self.context_shift_layer = None
+        self.output_layer = None
 
-        layers = [nn.Linear(input_dim + context_dim, hidden_dim), nn.ReLU()]
-        for _ in range(num_layers - 1):
-            layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.ReLU()])
-        layers.append(nn.Linear(hidden_dim, output_dim))
-        self.net = nn.Sequential(*layers)
+        if context_injection == "concat":
+            layers = [nn.Linear(input_dim + context_dim, hidden_dim), nn.ReLU()]
+            for _ in range(num_layers - 1):
+                layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.ReLU()])
+            layers.append(nn.Linear(hidden_dim, output_dim))
+            self.net = nn.Sequential(*layers)
+        elif context_injection == "adapter":
+            self.input_layer = nn.Linear(input_dim, hidden_dim)
+            self.hidden_layers = nn.ModuleList([nn.Linear(hidden_dim, hidden_dim) for _ in range(max(0, num_layers - 1))])
+            self.pre_head = nn.Linear(hidden_dim, hidden_dim)
+            self.context_scale_layer = nn.Linear(context_dim, hidden_dim)
+            self.context_shift_layer = nn.Linear(context_dim, hidden_dim)
+            self.output_layer = nn.Linear(hidden_dim, output_dim)
+        else:
+            raise ValueError(f"Unsupported context injection mode: {context_injection}")
 
     def _expand_context(self, x, context):
         if context.dim() == 1:
@@ -99,7 +130,17 @@ class ContextResidualMLP(nn.Module):
             x = x.unsqueeze(0)
             squeeze_output = True
         context = self._expand_context(x, context.to(dtype=x.dtype, device=x.device))
-        output = self.net(torch.cat([x, context], dim=-1))
+        if self.context_injection == "concat":
+            output = self.net(torch.cat([x, context], dim=-1))
+        else:
+            hidden = torch.relu(self.input_layer(x))
+            for layer in self.hidden_layers:
+                hidden = torch.relu(layer(hidden))
+            hidden = torch.relu(self.pre_head(hidden))
+            gamma = 1.0 + self.modulation_scale * torch.tanh(self.context_scale_layer(context))
+            beta = self.modulation_scale * self.context_shift_layer(context)
+            hidden = torch.relu(gamma * hidden + beta)
+            output = self.output_layer(hidden)
         return output.squeeze(0) if squeeze_output else output
 
     def forward(self, x):
@@ -206,6 +247,8 @@ def resolve_online_adaptation_config(
 
 def build_meta_components_from_checkpoint(checkpoint: dict):
     model_type = checkpoint.get("model_type", "maml")
+    context_injection = checkpoint.get("context_injection", "concat")
+    modulation_scale = float(checkpoint.get("modulation_scale", 0.25))
     if model_type == "context_meta":
         model = ContextResidualMLP(
             input_dim=checkpoint["input_dim"],
@@ -213,6 +256,8 @@ def build_meta_components_from_checkpoint(checkpoint: dict):
             hidden_dim=checkpoint["hidden_dim"],
             num_layers=checkpoint["num_layers"],
             context_dim=checkpoint["context_dim"],
+            context_injection=context_injection,
+            modulation_scale=modulation_scale,
         )
         model.load_state_dict(checkpoint["model_state_dict"])
         model.reset_context()
@@ -225,6 +270,8 @@ def build_meta_components_from_checkpoint(checkpoint: dict):
             hidden_dim=checkpoint["hidden_dim"],
             num_layers=checkpoint["num_layers"],
             context_dim=checkpoint["context_dim"],
+            context_injection=context_injection,
+            modulation_scale=modulation_scale,
         )
         model.load_state_dict(checkpoint["model_state_dict"])
         model.reset_context()
@@ -263,11 +310,21 @@ def wrap_state_angles(state: np.ndarray) -> np.ndarray:
 
 def reference_state(t: float, cfg: ReferenceConfig) -> np.ndarray:
     omega = 2.0 * np.pi / cfg.period
-    x_ref = cfg.center[0] + cfg.radius * np.cos(omega * t)
-    y_ref = cfg.center[1] + cfg.radius * np.sin(omega * t)
+    phase = omega * t
+    if cfg.traj_type == "circle":
+        x_ref = cfg.center[0] + cfg.radius * np.cos(phase)
+        y_ref = cfg.center[1] + cfg.radius * np.sin(phase)
+        x_dot_ref = -cfg.radius * omega * np.sin(phase)
+        y_dot_ref = cfg.radius * omega * np.cos(phase)
+    elif cfg.traj_type == "figure8":
+        y_radius = cfg.radius if cfg.y_radius is None else cfg.y_radius
+        x_ref = cfg.center[0] + cfg.radius * np.sin(phase)
+        y_ref = cfg.center[1] + 0.5 * y_radius * np.sin(2.0 * phase)
+        x_dot_ref = cfg.radius * omega * np.cos(phase)
+        y_dot_ref = y_radius * omega * np.cos(2.0 * phase)
+    else:
+        raise ValueError(f"Unsupported trajectory type: {cfg.traj_type}")
     z_ref = cfg.center[2] + cfg.z_amp * np.sin(0.5 * omega * t)
-    x_dot_ref = -cfg.radius * omega * np.sin(omega * t)
-    y_dot_ref = cfg.radius * omega * np.cos(omega * t)
     z_dot_ref = cfg.z_amp * 0.5 * omega * np.cos(0.5 * omega * t)
     return np.array([
         x_ref,
@@ -309,6 +366,7 @@ def make_env_config(
     episode_len_sec: float,
     inertial_prop=None,
     init_state_randomization_info=None,
+    init_state=None,
 ) -> dict:
     env_config = {
         "gui": gui,
@@ -326,6 +384,8 @@ def make_env_config(
     }
     if inertial_prop is not None:
         env_config["inertial_prop"] = inertial_prop
+    if init_state is not None:
+        env_config["init_state"] = init_state
     return env_config
 
 
@@ -333,10 +393,22 @@ def nominal_params() -> dict:
     return {name: BASE_PARAMS[name] * NOMINAL_RATIOS[name] for name in BASE_PARAMS}
 
 
-def control_bounds(gym_env) -> tuple[np.ndarray, np.ndarray]:
+def control_labels() -> list[str]:
+    return ["u1", "u2", "u3", "u4"]
+
+
+def motor_thrust_bounds(gym_env) -> tuple[np.ndarray, np.ndarray]:
     a_low = gym_env.KF * (gym_env.PWM2RPM_SCALE * gym_env.MIN_PWM + gym_env.PWM2RPM_CONST) ** 2
     a_high = gym_env.KF * (gym_env.PWM2RPM_SCALE * gym_env.MAX_PWM + gym_env.PWM2RPM_CONST) ** 2
     return a_low * np.ones(4), a_high * np.ones(4)
+
+
+def control_bounds(gym_env) -> tuple[np.ndarray, np.ndarray]:
+    return motor_thrust_bounds(gym_env)
+
+
+def input_reference() -> np.ndarray:
+    return np.zeros(4, dtype=float)
 
 
 def nominal_dynamics_terms(gym_env, model_name: str):
@@ -361,6 +433,7 @@ def nominal_dynamics_terms(gym_env, model_name: str):
     p_body = cs.MX.sym("p")
     q_body = cs.MX.sym("q")
     r_body = cs.MX.sym("r")
+
     f1 = cs.MX.sym("f1")
     f2 = cs.MX.sym("f2")
     f3 = cs.MX.sym("f3")
@@ -384,12 +457,12 @@ def nominal_dynamics_terms(gym_env, model_name: str):
     total_thrust = f1 + f2 + f3 + f4
     pos_dot = cs.vertcat(x_dot, y_dot, z_dot)
     pos_ddot = rot @ cs.vertcat(0, 0, total_thrust) / m - cs.vertcat(0, 0, g)
+    body_rates = cs.vertcat(p_body, q_body, r_body)
     body_torque = cs.vertcat(
         length / cs.sqrt(2.0) * (f1 + f2 - f3 - f4),
         length / cs.sqrt(2.0) * (-f1 + f2 + f3 - f4),
         gamma * (-f1 + f2 - f3 + f4),
     )
-    body_rates = cs.vertcat(p_body, q_body, r_body)
     body_rates_dot = j_inv @ (body_torque - cs.cross(body_rates, j @ body_rates))
     euler_rates = cs.vertcat(
         p_body + q_body * s_phi * cs.tan(theta) + r_body * c_phi * cs.tan(theta),
@@ -549,11 +622,20 @@ class MPC:
         return model_ac
 
 
-def build_result_dataframe(t_grid_inputs, x_history, u_history, ref_history, method_name, seed, env) -> pd.DataFrame:
+def build_result_dataframe(
+    t_grid_inputs,
+    x_history,
+    u_history,
+    ref_history,
+    method_name,
+    seed,
+    env,
+    action_labels: list[str],
+    executed_motor_history=None,
+) -> pd.DataFrame:
     min_length = min(len(t_grid_inputs), len(x_history) - 1, len(ref_history), len(u_history))
     state_cols = ["x", "x_dot", "y", "y_dot", "z", "z_dot", "phi", "theta", "psi", "p", "q", "r"]
     ref_cols = [f"{name}_ref" for name in state_cols]
-    action_cols = ["u1", "u2", "u3", "u4"]
 
     data = {
         "time": t_grid_inputs[:min_length],
@@ -566,8 +648,11 @@ def build_result_dataframe(t_grid_inputs, x_history, u_history, ref_history, met
     }
     for idx, col in enumerate(state_cols):
         data[col] = x_history[:min_length, idx]
-    for idx, col in enumerate(action_cols):
+    for idx, col in enumerate(action_labels):
         data[col] = u_history[:min_length, idx]
+    if executed_motor_history is not None:
+        for idx, col in enumerate(["motor_u1", "motor_u2", "motor_u3", "motor_u4"]):
+            data[col] = executed_motor_history[:min_length, idx]
     for idx, col in enumerate(ref_cols):
         data[col] = ref_history[:min_length, idx]
     return pd.DataFrame(data)
@@ -682,6 +767,13 @@ def finite_difference_targets(prev_state, next_state, action, nominal_func, dt: 
     return true_dyn - nominal
 
 
+def position_rmse(x_history, ref_history, start_idx: int = 0) -> float:
+    if start_idx >= len(ref_history):
+        raise ValueError("start_idx is beyond the available trajectory horizon.")
+    position_error = x_history[start_idx:-1, [0, 2, 4]] - ref_history[start_idx:, [0, 2, 4]]
+    return float(np.sqrt(np.mean(position_error ** 2)))
+
+
 def run_tracking(
     method: str,
     seed: int = 42,
@@ -696,19 +788,24 @@ def run_tracking(
     batch_size: int | None = None,
     adaptation_steps: int | None = None,
     adaptation_interval_sec: float | None = None,
+    meta_online_context_ema_decay: float | None = None,
+    meta_online_context_warmup_updates: int | None = None,
     t_horizon: float = 1.0,
     n_horizon: int = 20,
     sim_time: float = 12.0,
     reference_cfg: ReferenceConfig | None = None,
     inertial_prop=None,
     results_basename: str | None = None,
+    results_dir: Path | None = None,
+    rmse_warmup_sec: float | None = 2.0,
+    init_state=None,
 ):
     seed_everything(seed)
     method = method.lower()
     method_label = {"nominal": "nominal", "meta": "metamlp", "lightmlp": "lightmlp"}[method]
     reference_cfg = reference_cfg or ReferenceConfig(period=sim_time)
 
-    env = Quadrotor(**make_env_config(seed, gui, False, sim_time, inertial_prop=inertial_prop))
+    env = Quadrotor(**make_env_config(seed, gui, False, sim_time, inertial_prop=inertial_prop, init_state=init_state))
     obs, _ = env.reset()
     xt = wrap_state_angles(np.array(obs[:12], dtype=float))
     dt = 1.0 / env.CTRL_FREQ
@@ -723,6 +820,11 @@ def run_tracking(
     context_model = False
     context_encoder = None
     amortized_context_model = False
+    online_context_ema_decay = 0.0
+    online_context_warmup_updates = 1
+    context_update_count = 0
+    action_labels = control_labels()
+    input_ref = input_reference()
 
     if method == "nominal":
         model = Quadrotor3DNominalDynamics(env).model()
@@ -735,12 +837,27 @@ def run_tracking(
                 raise FileNotFoundError(f"Meta checkpoint not found: {ckpt_path}")
             print(f"Loading meta checkpoint: {ckpt_path}")
             checkpoint = torch.load(ckpt_path, map_location="cpu")
+            checkpoint_command_mode = checkpoint.get("command_mode", COMMAND_MODE_MOTOR_THRUST)
+            if checkpoint_command_mode != COMMAND_MODE_MOTOR_THRUST:
+                raise ValueError(
+                    f"Checkpoint command_mode={checkpoint_command_mode} is incompatible with direct motor thrust control."
+                )
             residual_mlp, context_encoder, model_type = build_meta_components_from_checkpoint(checkpoint)
             context_model = isinstance(residual_mlp, ContextResidualMLP)
             amortized_context_model = model_type == "amortized_context_meta"
             if context_model:
                 method_label = "metacontext"
                 context_inner_lr = float(checkpoint.get("inner_lr", 5e-2))
+                online_context_ema_decay = (
+                    float(checkpoint.get("online_context_ema_decay", 0.0))
+                    if meta_online_context_ema_decay is None
+                    else float(meta_online_context_ema_decay)
+                )
+                online_context_warmup_updates = (
+                    int(checkpoint.get("online_context_warmup_updates", 1))
+                    if meta_online_context_warmup_updates is None
+                    else int(meta_online_context_warmup_updates)
+                )
         else:
             residual_mlp = MLP(input_dim=16, output_dim=6, hidden_dim=hidden_dim, num_layers=num_layers)
 
@@ -779,7 +896,9 @@ def run_tracking(
                 "Online encoded-context config: "
                 f"batch_size={batch_size}, "
                 f"interval={adaptation_interval_sec:.2f}s, "
-                f"context_dim={residual_mlp.context_dim}"
+                f"context_dim={residual_mlp.context_dim}, "
+                f"ema={online_context_ema_decay:.2f}, "
+                f"warmup_updates={online_context_warmup_updates}"
             )
         elif context_model:
             print(
@@ -813,7 +932,7 @@ def run_tracking(
             x_ref_k = reference_state(current_time + k * t_horizon / n_horizon, reference_cfg)
             if k == 0:
                 ref_history.append(x_ref_k.copy())
-            solver.set(k, "yref", np.concatenate([x_ref_k, np.zeros(4)]))
+            solver.set(k, "yref", np.concatenate([x_ref_k, input_ref]))
 
         solver.set(n_horizon, "yref", reference_state(current_time + t_horizon, reference_cfg))
         solver.set(0, "lbx", xt)
@@ -841,7 +960,13 @@ def run_tracking(
                 if amortized_context_model:
                     with torch.no_grad():
                         context = context_encoder(x_batch, y_batch).squeeze(0)
+                        if context_update_count >= online_context_warmup_updates:
+                            context = (
+                                online_context_ema_decay * residual_mlp.context.detach()
+                                + (1.0 - online_context_ema_decay) * context
+                            )
                     residual_mlp.set_context(context)
+                    context_update_count += 1
                 elif context_model:
                     context = residual_mlp.context.detach().clone().requires_grad_(True)
                     for _ in range(adaptation_steps):
@@ -870,26 +995,55 @@ def run_tracking(
     ref_history = np.array(ref_history[: len(u_history)])
     t_grid_states = np.linspace(0.0, dt * (len(x_history) - 1), len(x_history))
     t_grid_inputs = np.linspace(0.0, dt * (len(u_history) - 1), len(u_history))
-    pos_rmse = np.sqrt(np.mean((x_history[:-1, [0, 2, 4]] - ref_history[:, [0, 2, 4]]) ** 2))
-    print(f"Mean MPC solve time: {1000 * np.mean(opt_times):.1f} ms -- {1 / np.mean(opt_times):.1f} Hz")
-    print(f"Position RMSE: {pos_rmse:.4f} m")
+    full_pos_rmse = position_rmse(x_history, ref_history, start_idx=0)
+    post_warmup_pos_rmse = None
+    warmup_steps = None
+    if rmse_warmup_sec is not None:
+        warmup_steps = int(np.ceil(rmse_warmup_sec / dt))
+        if warmup_steps < len(ref_history):
+            post_warmup_pos_rmse = position_rmse(x_history, ref_history, start_idx=warmup_steps)
+    mean_solve_time_ms = 1000 * np.mean(opt_times)
+    print(f"Mean MPC solve time: {mean_solve_time_ms:.1f} ms -- {1 / np.mean(opt_times):.1f} Hz")
+    print(f"Full Position RMSE: {full_pos_rmse:.4f} m")
+    if post_warmup_pos_rmse is not None:
+        print(f"Post-warmup Position RMSE ({rmse_warmup_sec:.1f}s+): {post_warmup_pos_rmse:.4f} m")
 
     fig = plot_tracking_results(x_history, ref_history, t_grid_states, t_grid_inputs, method_label)
-    results = {"position_rmse": float(pos_rmse), "csv_path": None, "plot_path": None, "animation_path": None}
+    results = {
+        "position_rmse": full_pos_rmse,
+        "full_position_rmse": full_pos_rmse,
+        "post_warmup_position_rmse": post_warmup_pos_rmse,
+        "rmse_warmup_sec": rmse_warmup_sec,
+        "rmse_warmup_steps": warmup_steps,
+        "mean_solve_time_ms": float(mean_solve_time_ms),
+        "csv_path": None,
+        "plot_path": None,
+        "animation_path": None,
+    }
 
     if save_flag:
-        DEFAULT_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        output_dir = Path(results_dir) if results_dir is not None else DEFAULT_RESULTS_DIR
+        output_dir.mkdir(parents=True, exist_ok=True)
         base_name = results_basename or method_label
-        csv_path = DEFAULT_RESULTS_DIR / f"{base_name}_seed{seed}.csv"
-        plot_path = DEFAULT_RESULTS_DIR / f"{base_name}_seed{seed}.png"
-        build_result_dataframe(t_grid_inputs, x_history, u_history, ref_history, method_label, seed, env).to_csv(csv_path, index=False)
+        csv_path = output_dir / f"{base_name}_seed{seed}.csv"
+        plot_path = output_dir / f"{base_name}_seed{seed}.png"
+        build_result_dataframe(
+            t_grid_inputs,
+            x_history,
+            u_history,
+            ref_history,
+            method_label,
+            seed,
+            env,
+            action_labels=action_labels,
+        ).to_csv(csv_path, index=False)
         fig.savefig(plot_path, dpi=300)
         print(f"Saved trajectory to {csv_path}")
         print(f"Saved plot to {plot_path}")
         results["csv_path"] = csv_path
         results["plot_path"] = plot_path
         if export_animation_flag:
-            animation_path = DEFAULT_RESULTS_DIR / f"{base_name}_seed{seed}.{animation_format}"
+            animation_path = output_dir / f"{base_name}_seed{seed}.{animation_format}"
             export_3d_animation(x_history[:-1], ref_history, animation_path, dt=dt, fps=20)
             print(f"Saved animation to {animation_path}")
             results["animation_path"] = animation_path
