@@ -35,7 +35,24 @@ REQUIRED_STATE_COLS = [
     "r",
 ]
 REFERENCE_COLS = ["x_ref", "y_ref", "z_ref"]
+DEFAULT_CSV_FILENAME = "figure8_meta_seed1.csv"
 DEFAULT_FPS = 50
+DEFAULT_WIDTH = 1280
+DEFAULT_HEIGHT = 720
+DEFAULT_CAMERA_YAW = 35.0
+DEFAULT_CAMERA_PITCH = -25.0
+DEFAULT_CAMERA_DISTANCE = None
+DEFAULT_DISTANCE_SCALE = 0.3
+DEFAULT_RESET_SEED = 42
+REPLAY_VIDEO_DIR_NAME = "replay_videos"
+REPLAY_VIDEO_SUFFIX = "_replay_HD.mp4"
+VIDEO_CODEC = "libx264"
+VIDEO_QUALITY = 8
+MIN_EPISODE_SEC = 1.0
+STABILIZATION_GOAL_TOLERANCE = 0.05
+CAMERA_FOV = 60
+CAMERA_NEAR = 0.1
+CAMERA_FAR = 100.0
 
 
 def parse_args():
@@ -43,19 +60,19 @@ def parse_args():
     parser.add_argument(
         "--csv",
         type=str,
-        default="nominal_seed1.csv",
+        default=DEFAULT_CSV_FILENAME,
         help="CSV filename in this results folder, or an absolute path.",
     )
     parser.add_argument("--fps", type=int, default=DEFAULT_FPS, help="Replay/export FPS.")
-    parser.add_argument("--width", type=int, default=1280, help="Render width.")
-    parser.add_argument("--height", type=int, default=720, help="Render height.")
-    parser.add_argument("--yaw", type=float, default=35.0, help="Camera yaw in degrees.")
-    parser.add_argument("--pitch", type=float, default=-25.0, help="Camera pitch in degrees.")
-    parser.add_argument("--distance", type=float, default=None, help="Override camera distance directly.")
+    parser.add_argument("--width", type=int, default=DEFAULT_WIDTH, help="Render width.")
+    parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT, help="Render height.")
+    parser.add_argument("--yaw", type=float, default=DEFAULT_CAMERA_YAW, help="Camera yaw in degrees.")
+    parser.add_argument("--pitch", type=float, default=DEFAULT_CAMERA_PITCH, help="Camera pitch in degrees.")
+    parser.add_argument("--distance", type=float, default=DEFAULT_CAMERA_DISTANCE, help="Override camera distance directly.")
     parser.add_argument(
         "--distance-scale",
         type=float,
-        default=1.0,
+        default=DEFAULT_DISTANCE_SCALE,
         help="Scale the auto-computed camera distance. Values below 1 zoom in.",
     )
     parser.add_argument("--follow", action="store_true", help="Follow the drone instead of using a fixed camera target.")
@@ -205,10 +222,10 @@ def build_env(df: pd.DataFrame, fps: int):
         "pyb_freq": fps,
         "quad_type": QuadType.THREE_D,
         "done_on_out_of_bound": False,
-        "episode_len_sec": max(1.0, len(df) / fps),
+        "episode_len_sec": max(MIN_EPISODE_SEC, len(df) / fps),
         "task_info": {
             "stabilization_goal": stabilization_goal,
-            "stabilization_goal_tolerance": 0.05,
+            "stabilization_goal_tolerance": STABILIZATION_GOAL_TOLERANCE,
         },
     }
     if inertial_prop is not None:
@@ -220,9 +237,9 @@ def main():
     args = parse_args()
     csv_path = resolve_csv_path(args.csv)
     csv_name = csv_path.name
-    video_dir = SCRIPT_DIR / "replay_videos"
+    video_dir = SCRIPT_DIR / REPLAY_VIDEO_DIR_NAME
     video_dir.mkdir(parents=True, exist_ok=True)
-    video_path = video_dir / f"{csv_path.stem}_replay_HD.mp4"
+    video_path = video_dir / f"{csv_path.stem}{REPLAY_VIDEO_SUFFIX}"
 
     df = pd.read_csv(csv_path)
     validate_columns(df)
@@ -236,7 +253,7 @@ def main():
         camera_distance = max(0.2, camera_distance * float(args.distance_scale))
 
     env = build_env(df, args.fps)
-    env.reset(seed=42)
+    env.reset(seed=DEFAULT_RESET_SEED)
     client = env.PYB_CLIENT
     drone_id = env.DRONE_ID
 
@@ -296,10 +313,10 @@ def main():
             upAxisIndex=2,
         )
         proj_matrix = p.computeProjectionMatrixFOV(
-            fov=60,
+            fov=CAMERA_FOV,
             aspect=args.width / args.height,
-            nearVal=0.1,
-            farVal=100.0,
+            nearVal=CAMERA_NEAR,
+            farVal=CAMERA_FAR,
         )
         _, _, px, _, _ = p.getCameraImage(
             width=args.width,
@@ -313,7 +330,7 @@ def main():
         frames.append(frame)
 
     print(f"Writing video to {video_path}")
-    with imageio.get_writer(video_path, fps=args.fps, codec="libx264", quality=8) as writer:
+    with imageio.get_writer(video_path, fps=args.fps, codec=VIDEO_CODEC, quality=VIDEO_QUALITY) as writer:
         for frame in tqdm(frames, desc="Writing"):
             writer.append_data(frame)
 

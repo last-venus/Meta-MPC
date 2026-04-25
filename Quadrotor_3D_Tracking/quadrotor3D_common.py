@@ -39,13 +39,78 @@ NOMINAL_RATIOS = {
     "Iyy": 0.8,
     "Izz": 0.8,
 }
-DEFAULT_META_DATASET_PATH = TRACKING_DIR / "meta_dataset_quadrotor3D" / "quadrotor3d_meta_residual_mpc.csv"
-DEFAULT_META_CHECKPOINT_PATH = TRACKING_DIR / "MetaLearning" / "maml_quadrotor3d_meta_init_3_128.pth"
-DEFAULT_META_FINAL_CHECKPOINT_PATH = TRACKING_DIR / "MetaLearning" / "maml_quadrotor3d_meta_init_3_128_final.pth"
-DEFAULT_RESULTS_DIR = TRACKING_DIR / "results"
-DEFAULT_ACADOS_EXPORT_DIR = TRACKING_DIR / "c_generated_code"
-DEFAULT_L4C_BUILD_DIR = TRACKING_DIR / "_l4c_generated"
+
+# Frequently edited experiment defaults live here so new runs do not require
+# digging through the control loop, data collection, or plotting code.
+META_DATASET_DIR_NAME = "meta_dataset_quadrotor3D"
+META_DATASET_FILENAME = "0425_meta_dataset.csv"
+META_CHECKPOINT_FILENAME = "0425_init_3_128.pth"
+META_FINAL_CHECKPOINT_FILENAME = "0425_final_3_128.pth"
+RESULTS_DIR_NAME = "results-0425"
+ACADOS_EXPORT_DIR_NAME = "c_generated_code"
+L4C_BUILD_DIR_NAME = "_l4c_generated"
+
+DEFAULT_META_DATASET_DIR = TRACKING_DIR / META_DATASET_DIR_NAME
+DEFAULT_META_DATASET_PATH = DEFAULT_META_DATASET_DIR / META_DATASET_FILENAME
+DEFAULT_META_CHECKPOINT_PATH = TRACKING_DIR / "MetaLearning" / META_CHECKPOINT_FILENAME
+DEFAULT_META_FINAL_CHECKPOINT_PATH = TRACKING_DIR / "MetaLearning" / META_FINAL_CHECKPOINT_FILENAME
+DEFAULT_RESULTS_DIR = TRACKING_DIR / RESULTS_DIR_NAME
+DEFAULT_ACADOS_EXPORT_DIR = TRACKING_DIR / ACADOS_EXPORT_DIR_NAME
+DEFAULT_L4C_BUILD_DIR = TRACKING_DIR / L4C_BUILD_DIR_NAME
+
+DEFAULT_RUN_SEED = 42
+DEFAULT_SCRIPT_SEED = 1
+DEFAULT_GUI = False
+DEFAULT_SAVE_RESULTS = True
+DEFAULT_SHOW_PLOT_WINDOW = False
+DEFAULT_EXPORT_ANIMATION = False
+DEFAULT_ANIMATION_FORMAT = "gif"
+DEFAULT_ANIMATION_FPS = 20
+DEFAULT_ANIMATION_AXIS_PAD = 0.15
+DEFAULT_ANIMATION_VIEW_ELEV = 24
+DEFAULT_ANIMATION_VIEW_AZIM = 35
+DEFAULT_T_HORIZON = 1.0
+DEFAULT_N_HORIZON = 20
+DEFAULT_SIM_TIME = 12.0
+DEFAULT_RMSE_WARMUP_SEC = 2.0
+DEFAULT_RESIDUAL_HIDDEN_DIM = 128
+DEFAULT_RESIDUAL_NUM_LAYERS = 3
+DEFAULT_LIGHTMLP_ADAPTATION_LR = 1e-3
+DEFAULT_LIGHTMLP_ADAPTATION_BATCH_SIZE = 96
+DEFAULT_LIGHTMLP_ADAPTATION_STEPS = 10
+DEFAULT_LIGHTMLP_ADAPTATION_INTERVAL_SEC = 1.0
+DEFAULT_META_CONTEXT_INNER_LR = 5e-2
+DEFAULT_ONLINE_CONTEXT_EMA_DECAY = 0.0
+DEFAULT_ONLINE_CONTEXT_WARMUP_UPDATES = 1
+
+DEFAULT_CTRL_FREQ = 50
+DEFAULT_PYB_FREQ = 50
+DEFAULT_STABILIZATION_GOAL = (0.0, 0.0, 1.0)
+DEFAULT_STABILIZATION_GOAL_TOLERANCE = 0.05
+DEFAULT_EVAL_INERTIAL_RATIOS = {
+    "M": 1.0,
+    "Ixx": 0.8,
+    "Iyy": 0.8,
+    "Izz": 0.8,
+}
+DEFAULT_EVAL_INERTIAL_PROP = [
+    BASE_PARAMS["M"] * DEFAULT_EVAL_INERTIAL_RATIOS["M"],
+    BASE_PARAMS["Ixx"] * DEFAULT_EVAL_INERTIAL_RATIOS["Ixx"],
+    BASE_PARAMS["Iyy"] * DEFAULT_EVAL_INERTIAL_RATIOS["Iyy"],
+    BASE_PARAMS["Izz"] * DEFAULT_EVAL_INERTIAL_RATIOS["Izz"],
+]
+
+MPC_STATE_WEIGHT_DIAG = np.array([8.0, 0.4, 8.0, 0.4, 12.0, 0.6, 1.5, 1.5, 1.0, 0.15, 0.15, 0.2], dtype=float)
+MPC_CONTROL_WEIGHT = 0.05
+DEFAULT_L4C_MODEL_NAME = "residual_quadrotor3D"
 COMMAND_MODE_MOTOR_THRUST = "motor_thrust"
+STATE_COLS = ["x", "x_dot", "y", "y_dot", "z", "z_dot", "phi", "theta", "psi", "p", "q", "r"]
+CONTROL_COLS = ["u1", "u2", "u3", "u4"]
+MOTOR_CONTROL_COLS = ["motor_u1", "motor_u2", "motor_u3", "motor_u4"]
+TRACKED_DERIVATIVE_INDICES = np.array([1, 3, 5, 9, 10, 11], dtype=int)
+METHOD_LABELS = {"nominal": "nominal", "meta": "metamlp", "lightmlp": "lightmlp"}
+MODEL_INPUT_DIM = len(STATE_COLS) + len(CONTROL_COLS)
+RESIDUAL_OUTPUT_DIM = len(TRACKED_DERIVATIVE_INDICES)
 
 
 @dataclass
@@ -239,9 +304,9 @@ def resolve_online_adaptation_config(
         )
 
     return (
-        96 if batch_size is None else batch_size,
-        10 if adaptation_steps is None else adaptation_steps,
-        1.0 if adaptation_interval_sec is None else adaptation_interval_sec,
+        DEFAULT_LIGHTMLP_ADAPTATION_BATCH_SIZE if batch_size is None else batch_size,
+        DEFAULT_LIGHTMLP_ADAPTATION_STEPS if adaptation_steps is None else adaptation_steps,
+        DEFAULT_LIGHTMLP_ADAPTATION_INTERVAL_SEC if adaptation_interval_sec is None else adaptation_interval_sec,
     )
 
 
@@ -249,7 +314,7 @@ def build_meta_components_from_checkpoint(checkpoint: dict):
     model_type = checkpoint.get("model_type", "maml")
     context_injection = checkpoint.get("context_injection", "concat")
     modulation_scale = float(checkpoint.get("modulation_scale", 0.25))
-    if model_type == "context_meta":
+    if model_type in {"context_meta", "amortized_context_meta"}:
         model = ContextResidualMLP(
             input_dim=checkpoint["input_dim"],
             output_dim=checkpoint["output_dim"],
@@ -261,20 +326,8 @@ def build_meta_components_from_checkpoint(checkpoint: dict):
         )
         model.load_state_dict(checkpoint["model_state_dict"])
         model.reset_context()
-        return model, None, model_type
-
-    if model_type == "amortized_context_meta":
-        model = ContextResidualMLP(
-            input_dim=checkpoint["input_dim"],
-            output_dim=checkpoint["output_dim"],
-            hidden_dim=checkpoint["hidden_dim"],
-            num_layers=checkpoint["num_layers"],
-            context_dim=checkpoint["context_dim"],
-            context_injection=context_injection,
-            modulation_scale=modulation_scale,
-        )
-        model.load_state_dict(checkpoint["model_state_dict"])
-        model.reset_context()
+        if model_type == "context_meta":
+            return model, None, model_type
         context_encoder = SupportSetEncoder(
             feature_dim=checkpoint["input_dim"],
             target_dim=checkpoint["output_dim"],
@@ -370,15 +423,15 @@ def make_env_config(
 ) -> dict:
     env_config = {
         "gui": gui,
-        "ctrl_freq": 50,
-        "pyb_freq": 50,
+        "ctrl_freq": DEFAULT_CTRL_FREQ,
+        "pyb_freq": DEFAULT_PYB_FREQ,
         "quad_type": QuadType.THREE_D,
         "seed": seed,
         "done_on_out_of_bound": done_on_out_of_bound,
         "episode_len_sec": episode_len_sec,
         "task_info": {
-            "stabilization_goal": [0.0, 0.0, 1.0],
-            "stabilization_goal_tolerance": 0.05,
+            "stabilization_goal": list(DEFAULT_STABILIZATION_GOAL),
+            "stabilization_goal_tolerance": DEFAULT_STABILIZATION_GOAL_TOLERANCE,
         },
         "init_state_randomization_info": init_state_randomization_info or default_init_randomization(),
     }
@@ -394,7 +447,7 @@ def nominal_params() -> dict:
 
 
 def control_labels() -> list[str]:
-    return ["u1", "u2", "u3", "u4"]
+    return CONTROL_COLS.copy()
 
 
 def motor_thrust_bounds(gym_env) -> tuple[np.ndarray, np.ndarray]:
@@ -590,8 +643,8 @@ class MPC:
         np.fill_diagonal(ocp.cost.Vu[nx:, :], 1.0)
         ocp.cost.Vz = np.array([[]])
 
-        q = np.diag([8.0, 0.4, 8.0, 0.4, 12.0, 0.6, 1.5, 1.5, 1.0, 0.15, 0.15, 0.2])
-        r = 0.05 * np.eye(nu)
+        q = np.diag(MPC_STATE_WEIGHT_DIAG)
+        r = MPC_CONTROL_WEIGHT * np.eye(nu)
         ocp.cost.W = scipy.linalg.block_diag(q, r)
         ocp.cost.W_e = q
         ocp.cost.yref = np.zeros(ny)
@@ -634,8 +687,7 @@ def build_result_dataframe(
     executed_motor_history=None,
 ) -> pd.DataFrame:
     min_length = min(len(t_grid_inputs), len(x_history) - 1, len(ref_history), len(u_history))
-    state_cols = ["x", "x_dot", "y", "y_dot", "z", "z_dot", "phi", "theta", "psi", "p", "q", "r"]
-    ref_cols = [f"{name}_ref" for name in state_cols]
+    ref_cols = [f"{name}_ref" for name in STATE_COLS]
 
     data = {
         "time": t_grid_inputs[:min_length],
@@ -646,12 +698,12 @@ def build_result_dataframe(
         "iyy": np.full(min_length, env.J[1, 1]),
         "izz": np.full(min_length, env.J[2, 2]),
     }
-    for idx, col in enumerate(state_cols):
+    for idx, col in enumerate(STATE_COLS):
         data[col] = x_history[:min_length, idx]
     for idx, col in enumerate(action_labels):
         data[col] = u_history[:min_length, idx]
     if executed_motor_history is not None:
-        for idx, col in enumerate(["motor_u1", "motor_u2", "motor_u3", "motor_u4"]):
+        for idx, col in enumerate(MOTOR_CONTROL_COLS):
             data[col] = executed_motor_history[:min_length, idx]
     for idx, col in enumerate(ref_cols):
         data[col] = ref_history[:min_length, idx]
@@ -707,7 +759,7 @@ def plot_tracking_results(x_history, ref_history, t_grid_states, t_grid_inputs, 
     return fig
 
 
-def export_3d_animation(x_history, ref_history, output_path: Path, dt: float, fps: int = 20):
+def export_3d_animation(x_history, ref_history, output_path: Path, dt: float, fps: int = DEFAULT_ANIMATION_FPS):
     from matplotlib import animation
 
     fig = plt.figure(figsize=(7, 6))
@@ -715,7 +767,7 @@ def export_3d_animation(x_history, ref_history, output_path: Path, dt: float, fp
     all_x = np.concatenate([x_history[:, 0], ref_history[:, 0]])
     all_y = np.concatenate([x_history[:, 2], ref_history[:, 2]])
     all_z = np.concatenate([x_history[:, 4], ref_history[:, 4]])
-    pad = 0.15
+    pad = DEFAULT_ANIMATION_AXIS_PAD
     ax.set_xlim(all_x.min() - pad, all_x.max() + pad)
     ax.set_ylim(all_y.min() - pad, all_y.max() + pad)
     ax.set_zlim(max(0.0, all_z.min() - pad), all_z.max() + pad)
@@ -723,7 +775,7 @@ def export_3d_animation(x_history, ref_history, output_path: Path, dt: float, fp
     ax.set_ylabel("y [m]")
     ax.set_zlabel("z [m]")
     ax.set_title("Quadrotor 3D Tracking Animation")
-    ax.view_init(elev=24, azim=35)
+    ax.view_init(elev=DEFAULT_ANIMATION_VIEW_ELEV, azim=DEFAULT_ANIMATION_VIEW_AZIM)
 
     ref_line, = ax.plot(ref_history[:, 0], ref_history[:, 2], ref_history[:, 4], "--", color="C0", linewidth=2, label="Reference")
     traj_line, = ax.plot([], [], [], color="C1", linewidth=2, label="Trajectory")
@@ -755,16 +807,199 @@ def export_3d_animation(x_history, ref_history, output_path: Path, dt: float, fp
 
 
 def finite_difference_targets(prev_state, next_state, action, nominal_func, dt: float):
-    true_dyn = np.array([
-        (next_state[1] - prev_state[1]) / dt,
-        (next_state[3] - prev_state[3]) / dt,
-        (next_state[5] - prev_state[5]) / dt,
-        (next_state[9] - prev_state[9]) / dt,
-        (next_state[10] - prev_state[10]) / dt,
-        (next_state[11] - prev_state[11]) / dt,
-    ])
-    nominal = nominal_func(prev_state, action).full().flatten()[[1, 3, 5, 9, 10, 11]]
+    true_dyn = (next_state[TRACKED_DERIVATIVE_INDICES] - prev_state[TRACKED_DERIVATIVE_INDICES]) / dt
+    nominal = nominal_func(prev_state, action).full().flatten()[TRACKED_DERIVATIVE_INDICES]
     return true_dyn - nominal
+
+
+def set_tracking_references(solver, current_time: float, n_horizon: int, t_horizon: float, reference_cfg: ReferenceConfig, input_ref: np.ndarray, ref_history: list) -> None:
+    for k in range(n_horizon):
+        x_ref_k = reference_state(current_time + k * t_horizon / n_horizon, reference_cfg)
+        if k == 0:
+            ref_history.append(x_ref_k.copy())
+        solver.set(k, "yref", np.concatenate([x_ref_k, input_ref]))
+    solver.set(n_horizon, "yref", reference_state(current_time + t_horizon, reference_cfg))
+
+
+def initialize_tracking_solver(
+    method: str,
+    env,
+    checkpoint_path,
+    hidden_dim: int,
+    num_layers: int,
+    meta_online_context_ema_decay: float | None,
+    meta_online_context_warmup_updates: int | None,
+    n_horizon: int,
+    t_horizon: float,
+):
+    residual_mlp = l4c_residual = residual_optimizer = residual_criterion = checkpoint = context_encoder = None
+    context_inner_lr = None
+    context_model = amortized_context_model = False
+    online_context_ema_decay = DEFAULT_ONLINE_CONTEXT_EMA_DECAY
+    online_context_warmup_updates = DEFAULT_ONLINE_CONTEXT_WARMUP_UPDATES
+    method_label = METHOD_LABELS[method]
+
+    if method == "nominal":
+        model = Quadrotor3DNominalDynamics(env).model()
+        with working_directory(TRACKING_DIR):
+            solver = MPC(model=model, n_horizon=n_horizon, t_horizon=t_horizon).solver
+        return {
+            "model": model,
+            "solver": solver,
+            "method_label": method_label,
+            "residual_mlp": residual_mlp,
+            "l4c_residual": l4c_residual,
+            "residual_optimizer": residual_optimizer,
+            "residual_criterion": residual_criterion,
+            "checkpoint": checkpoint,
+            "context_encoder": context_encoder,
+            "context_inner_lr": context_inner_lr,
+            "context_model": context_model,
+            "amortized_context_model": amortized_context_model,
+            "online_context_ema_decay": online_context_ema_decay,
+            "online_context_warmup_updates": online_context_warmup_updates,
+        }
+
+    if method == "meta":
+        ckpt_path = resolve_meta_checkpoint_path(checkpoint_path)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Meta checkpoint not found: {ckpt_path}")
+        print(f"Loading meta checkpoint: {ckpt_path}")
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        if checkpoint.get("command_mode", COMMAND_MODE_MOTOR_THRUST) != COMMAND_MODE_MOTOR_THRUST:
+            raise ValueError(f"Checkpoint command_mode={checkpoint.get('command_mode')} is incompatible with direct motor thrust control.")
+        residual_mlp, context_encoder, model_type = build_meta_components_from_checkpoint(checkpoint)
+        context_model = isinstance(residual_mlp, ContextResidualMLP)
+        amortized_context_model = model_type == "amortized_context_meta"
+        if context_model:
+            method_label = "metacontext"
+            context_inner_lr = float(checkpoint.get("inner_lr", DEFAULT_META_CONTEXT_INNER_LR))
+            online_context_ema_decay = float(checkpoint.get("online_context_ema_decay", DEFAULT_ONLINE_CONTEXT_EMA_DECAY)) if meta_online_context_ema_decay is None else float(meta_online_context_ema_decay)
+            online_context_warmup_updates = int(checkpoint.get("online_context_warmup_updates", DEFAULT_ONLINE_CONTEXT_WARMUP_UPDATES)) if meta_online_context_warmup_updates is None else int(meta_online_context_warmup_updates)
+    else:
+        residual_mlp = MLP(input_dim=MODEL_INPUT_DIM, output_dim=RESIDUAL_OUTPUT_DIM, hidden_dim=hidden_dim, num_layers=num_layers)
+
+    for param in residual_mlp.parameters():
+        param.requires_grad = False
+    l4c_residual = l4c.L4CasADi(residual_mlp, name=DEFAULT_L4C_MODEL_NAME, build_dir=DEFAULT_L4C_BUILD_DIR.as_posix(), mutable=True)
+    if not context_model or not amortized_context_model:
+        residual_optimizer = torch.optim.Adam(residual_mlp.parameters(), lr=DEFAULT_LIGHTMLP_ADAPTATION_LR)
+    residual_criterion = nn.MSELoss()
+    model = Quadrotor3DLearnedDynamics(env, l4c_residual).model()
+    with working_directory(TRACKING_DIR):
+        solver = MPC(
+            model=model,
+            n_horizon=n_horizon,
+            t_horizon=t_horizon,
+            external_shared_lib_dir=l4c_residual.shared_lib_dir,
+            external_shared_lib_name=l4c_residual.name,
+        ).solver
+    return {
+        "model": model,
+        "solver": solver,
+        "method_label": method_label,
+        "residual_mlp": residual_mlp,
+        "l4c_residual": l4c_residual,
+        "residual_optimizer": residual_optimizer,
+        "residual_criterion": residual_criterion,
+        "checkpoint": checkpoint,
+        "context_encoder": context_encoder,
+        "context_inner_lr": context_inner_lr,
+        "context_model": context_model,
+        "amortized_context_model": amortized_context_model,
+        "online_context_ema_decay": online_context_ema_decay,
+        "online_context_warmup_updates": online_context_warmup_updates,
+    }
+
+
+def maybe_adapt_residual_model(
+    step_idx: int,
+    adapt_every_steps: int,
+    batch_size: int,
+    feature_buffer: list,
+    target_buffer: list,
+    amortized_context_model: bool,
+    context_model: bool,
+    residual_mlp,
+    context_encoder,
+    residual_criterion,
+    residual_optimizer,
+    adaptation_steps: int,
+    context_inner_lr: float | None,
+    online_context_ema_decay: float,
+    online_context_warmup_updates: int,
+    context_update_count: int,
+    l4c_residual,
+):
+    if step_idx <= 0 or step_idx % adapt_every_steps != 0 or len(feature_buffer) < batch_size:
+        return context_update_count
+
+    x_batch = torch.tensor(np.array(feature_buffer[-batch_size:]), dtype=torch.float32)
+    y_batch = torch.tensor(np.array(target_buffer[-batch_size:]), dtype=torch.float32)
+    if amortized_context_model:
+        with torch.no_grad():
+            context = context_encoder(x_batch, y_batch).squeeze(0)
+            if context_update_count >= online_context_warmup_updates:
+                context = online_context_ema_decay * residual_mlp.context.detach() + (1.0 - online_context_ema_decay) * context
+        residual_mlp.set_context(context)
+        context_update_count += 1
+    elif context_model:
+        context = residual_mlp.context.detach().clone().requires_grad_(True)
+        for _ in range(adaptation_steps):
+            loss = residual_criterion(residual_mlp.forward_with_context(x_batch, context), y_batch)
+            grad, = torch.autograd.grad(loss, context)
+            context = context - context_inner_lr * grad
+        residual_mlp.set_context(context)
+    else:
+        for param in residual_mlp.parameters():
+            param.requires_grad = True
+        for _ in range(adaptation_steps):
+            residual_optimizer.zero_grad()
+            loss = residual_criterion(residual_mlp(x_batch), y_batch)
+            loss.backward()
+            residual_optimizer.step()
+        for param in residual_mlp.parameters():
+            param.requires_grad = False
+    l4c_residual.update(residual_mlp)
+    return context_update_count
+
+
+def save_tracking_artifacts(
+    save_flag: bool,
+    results_dir,
+    results_basename,
+    method_label: str,
+    seed: int,
+    t_grid_inputs,
+    x_history,
+    u_history,
+    ref_history,
+    env,
+    action_labels,
+    fig,
+    export_animation_flag: bool,
+    animation_format: str,
+    dt: float,
+    results: dict,
+):
+    if not save_flag:
+        return
+    output_dir = Path(results_dir) if results_dir is not None else DEFAULT_RESULTS_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base_name = results_basename or method_label
+    csv_path = output_dir / f"{base_name}_seed{seed}.csv"
+    plot_path = output_dir / f"{base_name}_seed{seed}.png"
+    build_result_dataframe(t_grid_inputs, x_history, u_history, ref_history, method_label, seed, env, action_labels=action_labels).to_csv(csv_path, index=False)
+    fig.savefig(plot_path, dpi=300)
+    print(f"Saved trajectory to {csv_path}")
+    print(f"Saved plot to {plot_path}")
+    results["csv_path"] = csv_path
+    results["plot_path"] = plot_path
+    if export_animation_flag:
+        animation_path = output_dir / f"{base_name}_seed{seed}.{animation_format}"
+        export_3d_animation(x_history[:-1], ref_history, animation_path, dt=dt, fps=DEFAULT_ANIMATION_FPS)
+        print(f"Saved animation to {animation_path}")
+        results["animation_path"] = animation_path
 
 
 def position_rmse(x_history, ref_history, start_idx: int = 0) -> float:
@@ -776,111 +1011,68 @@ def position_rmse(x_history, ref_history, start_idx: int = 0) -> float:
 
 def run_tracking(
     method: str,
-    seed: int = 42,
-    gui: bool = False,
-    save_flag: bool = True,
-    show_plot_window: bool = False,
-    export_animation_flag: bool = False,
-    animation_format: str = "gif",
+    seed: int = DEFAULT_RUN_SEED,
+    gui: bool = DEFAULT_GUI,
+    save_flag: bool = DEFAULT_SAVE_RESULTS,
+    show_plot_window: bool = DEFAULT_SHOW_PLOT_WINDOW,
+    export_animation_flag: bool = DEFAULT_EXPORT_ANIMATION,
+    animation_format: str = DEFAULT_ANIMATION_FORMAT,
     checkpoint_path: Path | None = None,
-    hidden_dim: int = 128,
-    num_layers: int = 3,
+    hidden_dim: int = DEFAULT_RESIDUAL_HIDDEN_DIM,
+    num_layers: int = DEFAULT_RESIDUAL_NUM_LAYERS,
     batch_size: int | None = None,
     adaptation_steps: int | None = None,
     adaptation_interval_sec: float | None = None,
     meta_online_context_ema_decay: float | None = None,
     meta_online_context_warmup_updates: int | None = None,
-    t_horizon: float = 1.0,
-    n_horizon: int = 20,
-    sim_time: float = 12.0,
+    t_horizon: float = DEFAULT_T_HORIZON,
+    n_horizon: int = DEFAULT_N_HORIZON,
+    sim_time: float = DEFAULT_SIM_TIME,
     reference_cfg: ReferenceConfig | None = None,
     inertial_prop=None,
     results_basename: str | None = None,
     results_dir: Path | None = None,
-    rmse_warmup_sec: float | None = 2.0,
+    rmse_warmup_sec: float | None = DEFAULT_RMSE_WARMUP_SEC,
     init_state=None,
 ):
     seed_everything(seed)
     method = method.lower()
-    method_label = {"nominal": "nominal", "meta": "metamlp", "lightmlp": "lightmlp"}[method]
     reference_cfg = reference_cfg or ReferenceConfig(period=sim_time)
-
+    if inertial_prop is None:
+        inertial_prop = list(DEFAULT_EVAL_INERTIAL_PROP)
     env = Quadrotor(**make_env_config(seed, gui, False, sim_time, inertial_prop=inertial_prop, init_state=init_state))
     obs, _ = env.reset()
     xt = wrap_state_angles(np.array(obs[:12], dtype=float))
     dt = 1.0 / env.CTRL_FREQ
     steps = int(sim_time / dt)
-
-    residual_mlp = None
-    l4c_residual = None
-    residual_optimizer = None
-    residual_criterion = None
-    checkpoint = None
-    context_inner_lr = None
-    context_model = False
-    context_encoder = None
-    amortized_context_model = False
-    online_context_ema_decay = 0.0
-    online_context_warmup_updates = 1
-    context_update_count = 0
     action_labels = control_labels()
     input_ref = input_reference()
-
-    if method == "nominal":
-        model = Quadrotor3DNominalDynamics(env).model()
-        with working_directory(TRACKING_DIR):
-            solver = MPC(model=model, n_horizon=n_horizon, t_horizon=t_horizon).solver
-    else:
-        if method == "meta":
-            ckpt_path = resolve_meta_checkpoint_path(checkpoint_path)
-            if not ckpt_path.exists():
-                raise FileNotFoundError(f"Meta checkpoint not found: {ckpt_path}")
-            print(f"Loading meta checkpoint: {ckpt_path}")
-            checkpoint = torch.load(ckpt_path, map_location="cpu")
-            checkpoint_command_mode = checkpoint.get("command_mode", COMMAND_MODE_MOTOR_THRUST)
-            if checkpoint_command_mode != COMMAND_MODE_MOTOR_THRUST:
-                raise ValueError(
-                    f"Checkpoint command_mode={checkpoint_command_mode} is incompatible with direct motor thrust control."
-                )
-            residual_mlp, context_encoder, model_type = build_meta_components_from_checkpoint(checkpoint)
-            context_model = isinstance(residual_mlp, ContextResidualMLP)
-            amortized_context_model = model_type == "amortized_context_meta"
-            if context_model:
-                method_label = "metacontext"
-                context_inner_lr = float(checkpoint.get("inner_lr", 5e-2))
-                online_context_ema_decay = (
-                    float(checkpoint.get("online_context_ema_decay", 0.0))
-                    if meta_online_context_ema_decay is None
-                    else float(meta_online_context_ema_decay)
-                )
-                online_context_warmup_updates = (
-                    int(checkpoint.get("online_context_warmup_updates", 1))
-                    if meta_online_context_warmup_updates is None
-                    else int(meta_online_context_warmup_updates)
-                )
-        else:
-            residual_mlp = MLP(input_dim=16, output_dim=6, hidden_dim=hidden_dim, num_layers=num_layers)
-
-        for param in residual_mlp.parameters():
-            param.requires_grad = False
-        l4c_residual = l4c.L4CasADi(
-            residual_mlp,
-            name="residual_quadrotor3D",
-            build_dir=DEFAULT_L4C_BUILD_DIR.as_posix(),
-            mutable=True,
-        )
-        if not context_model or not amortized_context_model:
-            residual_optimizer = torch.optim.Adam(residual_mlp.parameters(), lr=1e-3)
-        residual_criterion = nn.MSELoss()
-        model = Quadrotor3DLearnedDynamics(env, l4c_residual).model()
-        with working_directory(TRACKING_DIR):
-            solver = MPC(
-                model=model,
-                n_horizon=n_horizon,
-                t_horizon=t_horizon,
-                external_shared_lib_dir=l4c_residual.shared_lib_dir,
-                external_shared_lib_name=l4c_residual.name,
-            ).solver
+    controller = initialize_tracking_solver(
+        method,
+        env,
+        checkpoint_path,
+        hidden_dim,
+        num_layers,
+        meta_online_context_ema_decay,
+        meta_online_context_warmup_updates,
+        n_horizon,
+        t_horizon,
+    )
+    model = controller["model"]
+    solver = controller["solver"]
+    method_label = controller["method_label"]
+    residual_mlp = controller["residual_mlp"]
+    l4c_residual = controller["l4c_residual"]
+    residual_optimizer = controller["residual_optimizer"]
+    residual_criterion = controller["residual_criterion"]
+    checkpoint = controller["checkpoint"]
+    context_encoder = controller["context_encoder"]
+    context_inner_lr = controller["context_inner_lr"]
+    context_model = controller["context_model"]
+    amortized_context_model = controller["amortized_context_model"]
+    online_context_ema_decay = controller["online_context_ema_decay"]
+    online_context_warmup_updates = controller["online_context_warmup_updates"]
+    context_update_count = 0
 
     batch_size, adaptation_steps, adaptation_interval_sec = resolve_online_adaptation_config(
         method=method,
@@ -928,13 +1120,7 @@ def run_tracking(
 
     for step_idx in range(steps):
         current_time = step_idx * dt
-        for k in range(n_horizon):
-            x_ref_k = reference_state(current_time + k * t_horizon / n_horizon, reference_cfg)
-            if k == 0:
-                ref_history.append(x_ref_k.copy())
-            solver.set(k, "yref", np.concatenate([x_ref_k, input_ref]))
-
-        solver.set(n_horizon, "yref", reference_state(current_time + t_horizon, reference_cfg))
+        set_tracking_references(solver, current_time, n_horizon, t_horizon, reference_cfg, input_ref, ref_history)
         solver.set(0, "lbx", xt)
         solver.set(0, "ubx", xt)
 
@@ -954,37 +1140,25 @@ def run_tracking(
         if method != "nominal":
             feature_buffer.append(np.concatenate([prev_xt, ut]))
             target_buffer.append(finite_difference_targets(prev_xt, xt, ut, nominal_func, dt))
-            if step_idx > 0 and step_idx % adapt_every_steps == 0 and len(feature_buffer) >= batch_size:
-                x_batch = torch.tensor(np.array(feature_buffer[-batch_size:]), dtype=torch.float32)
-                y_batch = torch.tensor(np.array(target_buffer[-batch_size:]), dtype=torch.float32)
-                if amortized_context_model:
-                    with torch.no_grad():
-                        context = context_encoder(x_batch, y_batch).squeeze(0)
-                        if context_update_count >= online_context_warmup_updates:
-                            context = (
-                                online_context_ema_decay * residual_mlp.context.detach()
-                                + (1.0 - online_context_ema_decay) * context
-                            )
-                    residual_mlp.set_context(context)
-                    context_update_count += 1
-                elif context_model:
-                    context = residual_mlp.context.detach().clone().requires_grad_(True)
-                    for _ in range(adaptation_steps):
-                        loss = residual_criterion(residual_mlp.forward_with_context(x_batch, context), y_batch)
-                        grad, = torch.autograd.grad(loss, context)
-                        context = context - context_inner_lr * grad
-                    residual_mlp.set_context(context)
-                else:
-                    for param in residual_mlp.parameters():
-                        param.requires_grad = True
-                    for _ in range(adaptation_steps):
-                        residual_optimizer.zero_grad()
-                        loss = residual_criterion(residual_mlp(x_batch), y_batch)
-                        loss.backward()
-                        residual_optimizer.step()
-                    for param in residual_mlp.parameters():
-                        param.requires_grad = False
-                l4c_residual.update(residual_mlp)
+            context_update_count = maybe_adapt_residual_model(
+                step_idx,
+                adapt_every_steps,
+                batch_size,
+                feature_buffer,
+                target_buffer,
+                amortized_context_model,
+                context_model,
+                residual_mlp,
+                context_encoder,
+                residual_criterion,
+                residual_optimizer,
+                adaptation_steps,
+                context_inner_lr,
+                online_context_ema_decay,
+                online_context_warmup_updates,
+                context_update_count,
+                l4c_residual,
+            )
 
         if done:
             print(f"Episode ended early at step {step_idx}.")
@@ -1021,32 +1195,24 @@ def run_tracking(
         "animation_path": None,
     }
 
-    if save_flag:
-        output_dir = Path(results_dir) if results_dir is not None else DEFAULT_RESULTS_DIR
-        output_dir.mkdir(parents=True, exist_ok=True)
-        base_name = results_basename or method_label
-        csv_path = output_dir / f"{base_name}_seed{seed}.csv"
-        plot_path = output_dir / f"{base_name}_seed{seed}.png"
-        build_result_dataframe(
-            t_grid_inputs,
-            x_history,
-            u_history,
-            ref_history,
-            method_label,
-            seed,
-            env,
-            action_labels=action_labels,
-        ).to_csv(csv_path, index=False)
-        fig.savefig(plot_path, dpi=300)
-        print(f"Saved trajectory to {csv_path}")
-        print(f"Saved plot to {plot_path}")
-        results["csv_path"] = csv_path
-        results["plot_path"] = plot_path
-        if export_animation_flag:
-            animation_path = output_dir / f"{base_name}_seed{seed}.{animation_format}"
-            export_3d_animation(x_history[:-1], ref_history, animation_path, dt=dt, fps=20)
-            print(f"Saved animation to {animation_path}")
-            results["animation_path"] = animation_path
+    save_tracking_artifacts(
+        save_flag,
+        results_dir,
+        results_basename,
+        method_label,
+        seed,
+        t_grid_inputs,
+        x_history,
+        u_history,
+        ref_history,
+        env,
+        action_labels,
+        fig,
+        export_animation_flag,
+        animation_format,
+        dt,
+        results,
+    )
 
     if show_plot_window:
         plt.show()
