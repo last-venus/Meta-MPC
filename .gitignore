@@ -1,3 +1,5 @@
 Quadrotor_3D_Tracking/**
 !Quadrotor_3D_Tracking/**/
 !Quadrotor_3D_Tracking/**/*.py
+
+Quadrotor_2D_Tracking/**
