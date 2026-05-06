@@ -3,3 +3,8 @@ Quadrotor_3D_Tracking/**
 !Quadrotor_3D_Tracking/**/*.py
 
 Quadrotor_2D_Tracking/**
+
+Quadrotor_BodyRate_MetaResidual_MPC/**
+!Quadrotor_BodyRate_MetaResidual_MPC/**/
+!Quadrotor_BodyRate_MetaResidual_MPC/**/*.py
+!Quadrotor_BodyRate_MetaResidual_MPC/README.md
