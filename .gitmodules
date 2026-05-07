@@ -1,0 +1,6 @@
+[submodule "third_party/l4casadi"]
+	path = third_party/l4casadi
+	url = https://github.com/Tim-Salzmann/l4casadi.git
+[submodule "third_party/safe-control-gym"]
+	path = third_party/safe-control-gym
+	url = https://github.com/utiasDSL/safe-control-gym.git

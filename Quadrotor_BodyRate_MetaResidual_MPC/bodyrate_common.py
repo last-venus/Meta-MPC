@@ -19,8 +19,15 @@ MODULE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = MODULE_DIR.parent
 WORKSPACE_ROOT = REPO_ROOT.parent
 TRACKING_DIR = REPO_ROOT / "Quadrotor_3D_Tracking"
-SAFE_CONTROL_GYM_ROOT = WORKSPACE_ROOT / "safe-control-gym"
-for path in (SAFE_CONTROL_GYM_ROOT, TRACKING_DIR):
+SAFE_CONTROL_GYM_ROOTS = (
+    REPO_ROOT / "third_party" / "safe-control-gym",
+    WORKSPACE_ROOT / "safe-control-gym",
+)
+for path in SAFE_CONTROL_GYM_ROOTS:
+    if path.exists() and str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+        break
+for path in (TRACKING_DIR,):
     if path.exists() and str(path) not in sys.path:
         sys.path.insert(0, str(path))
 

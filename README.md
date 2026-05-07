@@ -42,8 +42,15 @@ Watch our [**YouTube video**](https://www.youtube.com/watch?v=4K2QeBxWcWA) showc
 **1. Clone the repository**
 
    ```bash
-   git clone https://github.com/yu-mei/MetaResidual-MPC.git
+   git clone --recurse-submodules https://github.com/yu-mei/MetaResidual-MPC.git
    cd MetaResidual-MPC
+   ```
+
+   If the repository has already been cloned without submodules, initialize the
+   third-party dependencies with:
+
+   ```bash
+   git submodule update --init --recursive
    ```
 
 **2. Create a conda environment**
@@ -53,19 +60,33 @@ Watch our [**YouTube video**](https://www.youtube.com/watch?v=4K2QeBxWcWA) showc
    conda activate l4control
    ```
 
-**3. Install `l4casadi`**
+**3. Install `l4casadi` from `third_party`**
 
-   Install the latest version using pip with `--no-build-isolation` (GPU/CUDA supported):
+   This repository tracks `l4casadi` as a git submodule under
+   `third_party/l4casadi`. Install it in editable mode with
+   `--no-build-isolation` (GPU/CUDA supported):
 
    ```bash
-   pip install l4casadi --no-build-isolation
+   pip install -e third_party/l4casadi --no-build-isolation
    ```
 
    > 🔗 Source: [github.com/Tim-Salzmann/l4casadi](https://github.com/Tim-Salzmann/l4casadi)
 
-**4. Install acados and the acados Python interface**
+**4. Install external `acados` and the acados Python interface**
 
-   4.1 Clone and build Acados
+   `acados` is intentionally kept as an external system dependency rather than
+   a submodule, because it is a compiled solver stack with machine-specific
+   build outputs.
+
+   4.1 Clone and build Acados outside this repository, for example:
+
+   ```bash
+   cd ..
+   git clone https://github.com/acados/acados.git
+   cd acados
+   git submodule update --recursive --init
+   # Then follow the official build instructions for your platform.
+   ```
 
    Follow the [official Acados installation guide](https://docs.acados.org/installation/index.html).
 
@@ -73,9 +94,24 @@ Watch our [**YouTube video**](https://www.youtube.com/watch?v=4K2QeBxWcWA) showc
 
    Follow the [Python interface installation guide](https://docs.acados.org/python_interface/index.html).
 
-**5. Install `safe-control-gym`**
+   4.3 Export the acados runtime paths before running experiments:
 
-   Follow the [official safe-control-gym installation guide](https://github.com/utiasDSL/safe-control-gym).
+   ```bash
+   export ACADOS_SOURCE_DIR=/path/to/acados
+   export LD_LIBRARY_PATH=$ACADOS_SOURCE_DIR/lib:$LD_LIBRARY_PATH
+   export PYTHONPATH=$ACADOS_SOURCE_DIR/interfaces/acados_template:$PYTHONPATH
+   ```
+
+**5. Install `safe-control-gym` from `third_party`**
+
+   This repository tracks `safe-control-gym` as a git submodule under
+   `third_party/safe-control-gym`:
+
+   ```bash
+   pip install -e third_party/safe-control-gym
+   ```
+
+   > 🔗 Source: [github.com/utiasDSL/safe-control-gym](https://github.com/utiasDSL/safe-control-gym)
 
 **6. Override PyTorch installation**
 
@@ -261,4 +297,3 @@ If you find our work useful, please consider citing:
 ```
 
 ---
-

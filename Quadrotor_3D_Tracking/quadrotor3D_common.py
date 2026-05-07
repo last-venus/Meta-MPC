@@ -16,10 +16,16 @@ from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 
 
 TRACKING_DIR = Path(__file__).resolve().parent
-WORKSPACE_ROOT = TRACKING_DIR.parents[2]
-SAFE_CONTROL_GYM_ROOT = WORKSPACE_ROOT / "safe-control-gym"
-if str(SAFE_CONTROL_GYM_ROOT) not in sys.path and SAFE_CONTROL_GYM_ROOT.exists():
-    sys.path.insert(0, str(SAFE_CONTROL_GYM_ROOT))
+REPO_ROOT = TRACKING_DIR.parent
+WORKSPACE_ROOT = REPO_ROOT.parent
+SAFE_CONTROL_GYM_ROOTS = (
+    REPO_ROOT / "third_party" / "safe-control-gym",
+    WORKSPACE_ROOT / "safe-control-gym",
+)
+for path in SAFE_CONTROL_GYM_ROOTS:
+    if path.exists() and str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+        break
 
 import l4casadi as l4c  # noqa: E402
 from safe_control_gym.envs.gym_pybullet_drones.quadrotor import Quadrotor  # noqa: E402

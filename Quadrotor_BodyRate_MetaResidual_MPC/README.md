@@ -47,6 +47,11 @@ The inner rate-loop now uses nominal inertia for the command-to-torque conversio
 
 ## First Run
 
+Install the repository dependencies from the project root first. `l4casadi` and
+`safe-control-gym` are expected under `third_party/`, while `acados` is an
+external installation exposed through `ACADOS_SOURCE_DIR`, `LD_LIBRARY_PATH`,
+and `PYTHONPATH`.
+
 From this folder:
 
 ```bash
