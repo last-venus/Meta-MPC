@@ -1,8 +1,8 @@
-# Quadrotor Body-Rate Context-Meta Residual MPC
+# Quadrotor Body-Rate Latent-Adaptation Residual MPC
 
 This folder is a self-contained research branch for:
 
-**Context-Meta Residual MPC for Adaptive Quadrotor Tracking with Body-Rate and Collective-Thrust Commands under Compound Dynamics Uncertainties**
+**Body-Frame Acceleration Residual MPC with Low-Dimensional Latent Adaptation for Adaptive Quadrotor Tracking under Compound Dynamics Uncertainties**
 
 The original `Quadrotor_3D_Tracking` module uses four motor thrusts as the MPC input. This branch keeps the same safe-control-gym/PyBullet quadrotor environment, but changes the MPC command interface to:
 
@@ -28,16 +28,19 @@ The inner rate-loop now uses nominal inertia for the command-to-torque conversio
   - Body-rate/thrust MPC dynamics.
   - Rate controller and motor-force allocation.
   - Hidden task perturbations: mass/inertia, thrust scale, rate-loop time constant, drag, wind.
-  - Nominal, online LightMLP, and amortized context-meta residual MPC runners.
+  - Nominal, online LightMLP, and latent-only meta residual MPC runners.
 
 - `MetaLearning/DataCollection_BodyRate.py`
-  - Collects residual targets for compound dynamics tasks.
+  - Collects three-dimensional body-frame acceleration residual targets for compound dynamics tasks.
+  - Includes validated 3.5--4.0 m/s circles and a 4.0 m/s figure-eight, plus low-speed tracking and calibration probes.
+  - Writes atomic `shard-*/data.csv` packages and a manifest; interrupted collection resumes without duplicating completed episodes.
   - Dataset input is `state + [p_cmd, q_cmd, r_cmd, thrust_cmd]`.
   - Residual target remains `[x_ddot, y_ddot, z_ddot, p_dot, q_dot, r_dot]`.
 
-- `MetaLearning/Offline_Train_BodyRate.py`
-  - Trains an amortized context residual model.
-  - Uses support windows to infer latent dynamics context.
+- `MetaLearning/Offline_Train_BodyFrameAccel.py`
+  - Trains a shared body-frame acceleration residual prior with a 6-D latent `z`.
+  - Uses Support → two `z` updates → subsequent Query meta-training, with velocity and short multi-step state prediction losses.
+  - `Offline_Train_BodyRate.py` remains a compatibility entry point and invokes this trainer for new runs.
 
 - `quadrotor3D_BodyRate_ExperimentSuite.py`
   - Runs interpolation, extrapolation, unseen trajectory, and compound disturbance tests.
@@ -55,17 +58,23 @@ and `PYTHONPATH`.
 From this folder:
 
 ```bash
-python MetaLearning/DataCollection_BodyRate.py --workers 4 --max-tasks 144
-python MetaLearning/Offline_Train_BodyRate.py --epochs 600
+python MetaLearning/DataCollection_BodyRate.py --workers 12 --max-tasks 512 --shard-size-tasks 8 --output-dir meta_dataset_bodyrate/bodyrate_bodyframe_accel_shards
+python MetaLearning/Offline_Train_BodyRate.py --csv-path meta_dataset_bodyrate/bodyrate_bodyframe_accel_shards --epochs 600
 python quadrotor3D_BodyRate_ExperimentSuite.py
 python summarize_results.py
+```
+
+If a collection is interrupted, resume exactly the same task bank instead of starting over:
+
+```bash
+python MetaLearning/DataCollection_BodyRate.py --workers 12 --max-tasks 512 --shard-size-tasks 8 --output-dir meta_dataset_bodyrate/bodyrate_bodyframe_accel_shards --resume
 ```
 
 For a quick smoke test:
 
 ```bash
-python MetaLearning/DataCollection_BodyRate.py --workers 1 --max-tasks 2
-python MetaLearning/Offline_Train_BodyRate.py --epochs 5 --meta-batch-size 1
+python MetaLearning/DataCollection_BodyRate.py --workers 1 --max-tasks 2 --shard-size-tasks 1 --output-dir /tmp/bodyrate_smoke_shards
+python MetaLearning/Offline_Train_BodyRate.py --csv-path /tmp/bodyrate_smoke_shards --epochs 5 --meta-batch-size 1
 python quadrotor3D_BodyRate_Nominal.py
 ```
 
@@ -75,7 +84,7 @@ Main baselines:
 
 - Nominal body-rate MPC.
 - Online LightMLP residual MPC.
-- Context-meta residual MPC with online context inference.
+- Meta-trained body-frame residual MPC with online latent-only adaptation.
 - Suggested next baseline: frozen domain-randomized residual MLP.
 - Suggested upper bound: oracle MPC with known disturbance/inner-loop parameters.
 
