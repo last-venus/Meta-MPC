@@ -1,10 +1,12 @@
+__pycache__/
+*.py[cod]
+
 Quadrotor_3D_Tracking/**
 !Quadrotor_3D_Tracking/**/
 !Quadrotor_3D_Tracking/**/*.py
-
-Quadrotor_2D_Tracking/**
+!Quadrotor_3D_Tracking/**/*.md
 
 Quadrotor_BodyRate_MetaResidual_MPC/**
 !Quadrotor_BodyRate_MetaResidual_MPC/**/
 !Quadrotor_BodyRate_MetaResidual_MPC/**/*.py
-!Quadrotor_BodyRate_MetaResidual_MPC/README.md
+!Quadrotor_BodyRate_MetaResidual_MPC/**/*.md

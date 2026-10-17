@@ -1,287 +1,108 @@
-# Fast Online Adaptive Neural MPC via Meta-Learning
+# MetaResidual-MPC：无人机残差模型预测控制
 
-[![arXiv](https://img.shields.io/badge/arXiv-2504.16369-brown)](https://arxiv.org/abs/2504.16369)
-[![YouTube](https://img.shields.io/badge/Youtube-🎬-red)](https://www.youtube.com/watch?v=4K2QeBxWcWA)
-[![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)]()
+本仓库基于 **Fast Online Adaptive Neural MPC via Meta-Learning**，保留三维四旋翼无人机的控制、数据采集、离线训练、在线适配和结果分析代码。
 
-This is the official implementation of the paper:  
-[**"Fast Online Adaptive Neural MPC via Meta-Learning"**](https://arxiv.org/abs/2504.16369)  
-by **Yu Mei**, **Xinyu Zhou**, **Shuyang Yu**, **Vaibhav Srivastava**, and **Xiaobo Tan**.
+论文：Yu Mei, Xinyu Zhou, Shuyang Yu, Vaibhav Srivastava, Xiaobo Tan，
+[Fast Online Adaptive Neural MPC via Meta-Learning](https://arxiv.org/abs/2504.16369)。
 
----
+## 目录
 
-## 📑 Table of Contents
-- [Fast Online Adaptive Neural MPC via Meta-Learning](#fast-online-adaptive-neural-mpc-via-meta-learning)
-  - [📑 Table of Contents](#-table-of-contents)
-  - [🎥 Demonstration Video](#-demonstration-video)
-  - [🛠️ Installation Instructions](#️-installation-instructions)
-  - [🚀 How to Run](#-how-to-run)
-    - [1. Van-der-Pol Oscillator](#1-van-der-pol-oscillator)
-    - [2. CartPole](#2-cartpole)
-    - [3. 2D Quadrotor Stabilization and Tracking](#3-2d-quadrotor-stabilization-and-tracking)
-      - [Stabilization Results](#stabilization-results)
-      - [Tracking Results](#tracking-results)
-  - [📚 Project Structure](#-project-structure)
-  - [📝 Citation](#-citation)
----
+| 目录 | 用途 |
+| --- | --- |
+| `Quadrotor_3D_Tracking/` | 以四个电机推力为输入的三维轨迹跟踪，以及 BodyRate 分支共用的模型和工具 |
+| `Quadrotor_BodyRate_MetaResidual_MPC/` | 以机体系角速度和总推力为输入的残差 MPC、数据采集和元训练 |
+| `third_party/l4casadi/` | PyTorch 残差网络与 CasADi 的接口，Git 子模块 |
+| `third_party/safe-control-gym/` | 四旋翼仿真环境，Git 子模块 |
+| `environment.yml` | Conda 环境配置 |
 
-## 🎥 Demonstration Video
+BodyRate 分支会导入 `Quadrotor_3D_Tracking/quadrotor3D_common.py`，需要同时保留这两个目录。
 
-<p align="center">
-  <a href="https://www.youtube.com/watch?v=4K2QeBxWcWA">
-    <img src="http://img.youtube.com/vi/4K2QeBxWcWA/0.jpg" alt="Watch the video" width="60%" style="box-shadow: 1px 1px 6px rgba(0, 0, 0, 0.3); border-radius: 8px;">
-  </a>
-</p>
+详细说明：
 
-Watch our [**YouTube video**](https://www.youtube.com/watch?v=4K2QeBxWcWA) showcasing the control performance on the CartPole and 2D Quadrotor environments using the proposed Fast Online Meta-MPC framework.
+- [BodyRate 数据采集、训练与实验](Quadrotor_BodyRate_MetaResidual_MPC/README.md)
+- [三维跟踪中文详解](Quadrotor_3D_Tracking/3D_TRACKING_中文详解.md)
 
----
+## 安装依赖
 
-## 🛠️ Installation Instructions
-
-**1. Clone the repository**
-
-   ```bash
-   git clone --recurse-submodules https://github.com/yu-mei/MetaResidual-MPC.git
-   cd MetaResidual-MPC
-   ```
-
-   If the repository has already been cloned without submodules, initialize the
-   third-party dependencies with:
-
-   ```bash
-   git submodule update --init --recursive
-   ```
-
-**2. Create a conda environment**
-
-   ```bash
-   conda env create -f environment.yml
-   conda activate l4control
-   ```
-
-**3. Install `l4casadi` from `third_party`**
-
-   This repository tracks `l4casadi` as a git submodule under
-   `third_party/l4casadi`. Install it in editable mode with
-   `--no-build-isolation` (GPU/CUDA supported):
-
-   ```bash
-   pip install -e third_party/l4casadi --no-build-isolation
-   ```
-
-   > 🔗 Source: [github.com/Tim-Salzmann/l4casadi](https://github.com/Tim-Salzmann/l4casadi)
-
-**4. Install external `acados` and the acados Python interface**
-
-   `acados` is intentionally kept as an external system dependency rather than
-   a submodule, because it is a compiled solver stack with machine-specific
-   build outputs.
-
-   4.1 Clone and build Acados outside this repository, for example:
-
-   ```bash
-   cd ..
-   git clone https://github.com/acados/acados.git
-   cd acados
-   git submodule update --recursive --init
-   # Then follow the official build instructions for your platform.
-   ```
-
-   Follow the [official Acados installation guide](https://docs.acados.org/installation/index.html).
-
-   4.2 Install the Acados Python interface
-
-   Follow the [Python interface installation guide](https://docs.acados.org/python_interface/index.html).
-
-   4.3 Export the acados runtime paths before running experiments:
-
-   ```bash
-   export ACADOS_SOURCE_DIR=/path/to/acados
-   export LD_LIBRARY_PATH=$ACADOS_SOURCE_DIR/lib:$LD_LIBRARY_PATH
-   export PYTHONPATH=$ACADOS_SOURCE_DIR/interfaces/acados_template:$PYTHONPATH
-   ```
-
-**5. Install `safe-control-gym` from `third_party`**
-
-   This repository tracks `safe-control-gym` as a git submodule under
-   `third_party/safe-control-gym`:
-
-   ```bash
-   pip install -e third_party/safe-control-gym
-   ```
-
-   > 🔗 Source: [github.com/utiasDSL/safe-control-gym](https://github.com/utiasDSL/safe-control-gym)
-
-**6. Override PyTorch installation**
-
-   Due to version conflicts between `l4casadi` and `safe-control-gym`, it is necessary to override PyTorch:
-
-   ```bash
-   conda install pytorch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 pytorch-cuda=12.4 -c pytorch -c nvidia
-   ```
-
-   > ⚠️ This ensures compatibility with both `l4casadi` and `safe-control-gym`.  
-   > 🔧 Make sure your CUDA drivers are compatible with CUDA 12.4.
-
-**7. Fix installation issues (if any)**
-
-   If you encounter any remaining errors, manually install the missing or incompatible packages.  
-   Package versions may vary depending on your system environment.
-
----
-
-## 🚀 How to Run
-
-### 1. Van-der-Pol Oscillator
-We provide several scripts under `VanderPol/` for running different versions of the Van der Pol system using Meta-MPC:
-
-| Script | Description |
-|--------|-------------|
-| `VanderPolSys_sim.py` | Simulates the nominal Van der Pol system. |
-| `VanderPolSys_real.py` | Simulates the real system (with mismatched dynamics). |
-| `VanderPolSys_naive.py` | Runs nominal MPC to predict the trajectories. |
-| `VanderPolSys_naive_lightmlp.py` | Runs nominal MPC with a lightweight learned MLP model (learn from stratch)|
-| `VanderPolSys_naive_meta.py` | Runs MPC using a meta-learned model. |
-| `VanderPolSys_Collection_Meta.py` | Collects offline data for training the meta-learned model, and data file `vdp_meta_nominal_residual.py` is under dataset|
-| `Comparsion.ipynb` | Jupyter notebook comparing performance across methods. |
-| `MetaLearning/Offline_Train_Meta.py`| Training the Meta MLP offline using the data file `vdp_meta_nominal_residual.py`|
-
-📌 Example: Run nominal MPC + Meta MLP
+在仓库根目录执行：
 
 ```bash
-cd VanderPol
-python VanderPolsys_naive_meta.py
+git submodule update --init --recursive
+conda env create -f environment.yml
+conda activate l4control
 ```
 
-After running the different methods and saving results in the `results/` folder, open `Comparsion.ipynb` to visualize and compare the performance.
-
-<p align="center">
-  <img src="assets/vanderpol_results.png" alt="Van der Pol Results" width="75%">
-</p>
-
----
-
-### 2. CartPole
-
-We provide several scripts under `Cartpole/` to run different MPC controllers for the CartPole system using our Meta-MPC framework:
-
-| Script | Description |
-|--------|-------------|
-| `cartpole_Nominal.py` | Runs MPC with a nominal (physics-based) model. |
-| `cartpole_LightMLP.py` | Runs MPC using a learned residual MLP trained from scratch. |
-| `cartpole_MetaMLP.py` | Runs MPC using a meta-learned residual MLP with online adaptation. |
-| `cartpole_Nominal_seeds.py` | Batch test across seeds using nominal model. |
-| `cartpole_LightMLP_seeds.py` | Batch test using residual MLP (non-meta). |
-| `cartpole_MetaMLP_seeds.py` | Batch test using meta-residual MLP model. |
-| `MetaLearning/DataCollection_Meta.py` | Collects residual training data for meta-learning. The output is saved in `meta_dataset_mpc/`. |
-| `MetaLearning/Offline_Train_Meta.py` | Trains the Meta-Residual MLP model using the collected CSV dataset. |
-| `meta_dataset_mpc/cartpole_meta_residual_mpc.csv` | CSV dataset collected from `DataCollection_Meta.py` used for offline meta-learning. |
-| `Comparsion.ipynb` | Jupyter notebook to visualize and compare results across all methods. |
-
-📌 Example: Run Meta-MPC with Online Adaptation
+已有 `l4control` 环境时直接激活即可。安装 `l4casadi` 前需要先安装 PyTorch；原项目使用的组合为：
 
 ```bash
-cd Cartpole
-python cartpole_MetaMLP.py
+conda install pytorch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 pytorch-cuda=12.4 -c pytorch -c nvidia
+pip install -e third_party/l4casadi --no-build-isolation
+pip install -e third_party/safe-control-gym
 ```
 
-📌 Example: Collect Residual Data for Meta-Training
+`safe-control-gym` 的依赖安装可能改变 PyTorch 版本；安装后检查环境，必要时重新安装上述版本。
+
+### acados 使用外部安装
+
+`third_party/` **没有 acados**。它是包含本机编译产物的外部求解器依赖，当前机器使用：
+
+```text
+/home/jingxiuya/czc_code/acados
+```
+
+保留这个目录。新机器请先构建 acados，再在已激活的 Conda 环境中安装 Python 接口：
 
 ```bash
-python MetaLearning/DataCollection_Meta.py
+export ACADOS_SOURCE_DIR=/home/jingxiuya/czc_code/acados
+export LD_LIBRARY_PATH="$ACADOS_SOURCE_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+pip install -e "$ACADOS_SOURCE_DIR/interfaces/acados_template"
 ```
 
-📌 Example: Train Meta Residual MLP Offline
+其他机器应将 `ACADOS_SOURCE_DIR` 改为实际安装路径。
+
+外部的 `/home/jingxiuya/czc_code/l4casadi` 源码副本已清理，后续安装、修改源码统一使用 `third_party/l4casadi/`。清理时确认当前 `l4control` 使用独立安装于 `site-packages` 的 `l4casadi`，无需因删除旧源码副本而重新安装。
+
+外部的 `/home/jingxiuya/czc_code/safe-control-gym` 重复副本也已清理，`l4control` 环境的可编辑安装路径已迁移到 `third_party/safe-control-gym/`，并通过无界面三维四旋翼初始化和一步仿真验证。该子模块保留完整上游内容，以便更新和使用仿真环境。
+
+## 运行无人机实验
+
+以下命令均从仓库根目录开始，在 `l4control` 环境中执行。学习控制器需要对应目录中已有训练好的模型；没有模型时先运行该模块的采集、训练脚本。
+
+### 三维电机推力控制
 
 ```bash
-python MetaLearning/Offline_Train_Meta.py
+cd Quadrotor_3D_Tracking
+python quadrotor3D_Nominal.py
+python quadrotor3D_Lightmlp.py
+python quadrotor3D_Meta.py
 ```
 
-After running all variants, results will be saved in the `results/` folder.  
-Open `Comparsion.ipynb` to visualize metrics such as RMSE, trajectory tracking, and adaptation efficiency.
+`quadrotor3D_Figure8_Eval.py` 提供八字轨迹对比，`*_seeds.py` 提供多随机种子实验。参数和数据路径集中在 `quadrotor3D_common.py`。
 
-<p align="center">
-  <img src="assets/CartPole_Nominal.gif" alt="Nominal MPC" width="30%" style="margin-right: 10px;">
-  <img src="assets/CartPole_MLP.gif" alt="Neural MPC + MLP" width="30%" style="margin-right: 10px;">
-  <img src="assets/CartPole_MetaMLP.gif" alt="Neural MPC + MetaMLP" width="30%">
-</p>
-
-<p align="center">
-  <em>Left: Nominal MPC &nbsp; | &nbsp; Middle: Neural MPC + Residual MLP &nbsp; | &nbsp; Right: Neural MPC + Residual Meta-MLP</em>
-</p>
-
----
-
-### 3. 2D Quadrotor Stabilization and Tracking
-
-We provide two folders for 2D Quadrotor control tasks using our Meta-MPC framework:
-
-- `Quadrotor_2D_Stabilization/`: for stabilization tasks
-- `Quadrotor_2D_Tracking/`: for reference trajectory tracking
-
-Each folder contains scripts to run, which is similar as CartPole system:
-
-📌 Example: Run Meta-MPC for Stabilization
+### BodyRate 控制与元学习
 
 ```bash
-cd Quadrotor_2D_Stabilization
-python quadrotor2D_Meta.py
+cd Quadrotor_BodyRate_MetaResidual_MPC
+python quadrotor3D_BodyRate_Nominal.py
 ```
 
-📌 Example: Run Meta-MPC for Tracking
+完整的数据采集、训练、对比实验和结果汇总见 [BodyRate README](Quadrotor_BodyRate_MetaResidual_MPC/README.md)。
+
+## 清理范围与历史恢复
+
+此次整理删除了 `Cartpole/`、`VanderPol/`、`Quadrotor_2D_Tracking/`、`Quadrotor_2D_Stabilization/` 及对应的展示图片，图片删空后移除了 `assets/`。现保留三维轨迹跟踪和 BodyRate 两个无人机模块，以及这些模块的现有数据、模型和结果。三维跟踪和 BodyRate 不依赖已删除的二维模块。没有改写 Git 历史，也没有删除保留模块的未提交修改。
+
+`.gitignore` 允许跟踪无人机 Python 源码和 Markdown 说明，忽略 Python 缓存以及新增的部分实验产物。已有的已跟踪文件仍由 Git 管理。
+
+删除内容可以从清理前的提交恢复。例如，在本次清理尚未提交时：
 
 ```bash
-cd Quadrotor_2D_Tracking
-python quadrotor2D_Meta.py
+git restore --source=HEAD -- Cartpole VanderPol Quadrotor_2D_Tracking Quadrotor_2D_Stabilization assets
 ```
 
-#### Stabilization Results
+清理提交后，将 `HEAD` 换成清理前的提交号。忽略或未提交的数据、模型和结果需要另外备份，不能依靠 Git 历史恢复。
 
-<p align="center">
-  <img src="assets/Quadrotor_stabilization_Nominal.gif" alt="Nominal MPC" width="32%" style="margin-right: 8px;">
-  <img src="assets/Quadrotor_stabilization_MLP.gif" alt="MLP Residual MPC" width="32%" style="margin-right: 8px;">
-  <img src="assets/Quadrotor_stabilization_MetaMLP.gif" alt="Meta-Residual MPC" width="32%">
-</p>
-
-<p align="center">
-  <em>Left: Nominal MPC &nbsp; | &nbsp; Middle: MPC + Residual MLP &nbsp; | &nbsp; Right: Neural MPC + Residual Meta-MLP</em>
-</p>
-
----
-
-#### Tracking Results
-
-<p align="center">
-  <img src="assets/Quadrotor_tracking_Nominal.gif" alt="Nominal MPC" width="32%" style="margin-right: 8px;">
-  <img src="assets/Quadrotor_tracking_MLP.gif" alt="MLP Residual MPC" width="32%" style="margin-right: 8px;">
-  <img src="assets/Quadrotor_tracking_MetaMLP.gif" alt="Meta-Residual MPC" width="32%">
-</p>
-
-<p align="center">
-  <em>Left: Nominal MPC &nbsp; | &nbsp; Middle: MPC + Residual MLP &nbsp; | &nbsp; Right: Neural MPC + Residual Meta-MLP</em>
-</p>
-
----
-
-## 📚 Project Structure
-
-```
-MetaResidual-MPC/
-├── assets/                      # Demo GIFs and figures used in README (e.g., CartPole_MetaMLP.gif, Quadrotor_*.gif)
-├── Cartpole/                    # Code for CartPole experiments
-├── Quadrotor_2D_Stabilization/  # Code for 2D Quadrotor stabilization tasks
-├── Quadrotor_2D_Tracking/       # Code for 2D Quadrotor trajectory tracking tasks
-├── VanderPol/                   # Code for Van der Pol oscillator experiments
-├── environment.yml              # Conda environment file
-└── README.md                    # Project documentation
-```
-
----
-
-## 📝 Citation
-
-If you find our work useful, please consider citing:
+## 引用
 
 ```bibtex
 @article{mei2025fast,
@@ -295,5 +116,3 @@ If you find our work useful, please consider citing:
   publisher={Elsevier}
 }
 ```
-
----
